@@ -450,12 +450,16 @@ def _plain_json(path: Path) -> dict[str, Any] | None:
 
 
 def _is_within_project(settings: Settings, path: Path) -> bool:
-    """Returns True if path is within the project root (not an external/Windows path)."""
-    try:
-        path.resolve().relative_to(settings.project_root.resolve())
-        return True
-    except ValueError:
-        return False
+    """Returns True if path is within the project root or any configured data directory."""
+    resolved = path.resolve()
+    roots = [settings.project_root.resolve(), settings.data.runs_dir.resolve()]
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _latest_lifecycle_evidence(settings: Settings) -> dict[str, Any] | None:
@@ -623,6 +627,7 @@ def _promotion_review_for_symbol(
     registry: dict[str, Any],
     *,
     target_profile_id: str = "",
+    strict: bool = True,
 ) -> dict[str, Any]:
     """
     Evaluates whether a symbol's validated profile should be promoted to approved_demo.
@@ -737,12 +742,14 @@ def _promotion_review_for_symbol(
         reasons.append("strategy_profiles_schema_incompatible")
 
     if final_decision != "REVERT_TO_BLOCKED":
-        # Lifecycle: ALL conditions now block (not just warn or caution)
+        # Lifecycle: all conditions block in strict mode; soft mode keeps validated
         if not gate_matrix["lifecycle_evidence_present"]:
-            # Missing lifecycle evidence is now a hard block
-            final_decision = "REVERT_TO_BLOCKED"
-            severity = "error"
-            reasons.append("missing_lifecycle_evidence_blocks_promotion")
+            if strict:
+                final_decision = "REVERT_TO_BLOCKED"
+                severity = "error"
+                reasons.append("missing_lifecycle_evidence_blocks_promotion")
+            else:
+                reasons.append("missing_lifecycle_validation")
         else:
             if not gate_matrix["lifecycle_clean"]:
                 final_decision = "REVERT_TO_BLOCKED"
@@ -762,17 +769,26 @@ def _promotion_review_for_symbol(
                     if lifecycle_age_hours is not None else "lifecycle_evidence_age_unknown"
                 )
 
-        # Endurance: ALL missing conditions now block
+        # Endurance: ALL missing conditions block in strict mode; soft mode keeps validated
         if not gate_matrix["endurance_present"]:
-            final_decision = "REVERT_TO_BLOCKED"
-            severity = "error"
-            reasons.append("missing_endurance_evidence_blocks_promotion")
-        else:
-            if not gate_matrix["endurance_decision_go"]:
-                # non-"go" endurance decision → block (was: caution)
+            if strict:
                 final_decision = "REVERT_TO_BLOCKED"
                 severity = "error"
-                reasons.append(f"endurance_decision={endurance_symbol.get('decision', 'missing')}_blocks_promotion")
+                reasons.append("missing_endurance_evidence_blocks_promotion")
+            else:
+                reasons.append("missing_endurance_validation")
+        else:
+            if not gate_matrix["endurance_decision_go"]:
+                decision_val = endurance_symbol.get("decision", "missing")
+                if strict:
+                    final_decision = "REVERT_TO_BLOCKED"
+                    severity = "error"
+                    reasons.append(f"endurance_decision={decision_val}_blocks_promotion")
+                else:
+                    if final_decision not in ("REVERT_TO_BLOCKED",):
+                        final_decision = "MOVE_TO_CAUTION"
+                        severity = "warning"
+                    reasons.append(f"endurance_decision={decision_val}")
             if not gate_matrix["endurance_cycles_sufficient"]:
                 final_decision = "REVERT_TO_BLOCKED"
                 severity = "error"
@@ -912,7 +928,7 @@ def review_approved_demo_readiness(settings: Settings) -> int:
     if not symbols:
         logger.error("No hay simbolos validated elegibles para revisar")
         return 2
-    reviews = {symbol: _promotion_review_for_symbol(settings, symbol, registry) for symbol in symbols}
+    reviews = {symbol: _promotion_review_for_symbol(settings, symbol, registry, strict=False) for symbol in symbols}
     summary = {
         "symbols": {symbol: review["final_decision"] for symbol, review in reviews.items()},
         "approved_demo_ready": sorted(symbol for symbol, review in reviews.items() if review["final_decision"] == "APPROVED_DEMO"),

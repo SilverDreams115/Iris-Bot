@@ -81,12 +81,9 @@ def _write_stability_artifact(settings, run_id: str, symbol: str, decision: str 
                 "profit_factor_degradation_pct": 0.05,
                 "alerts_by_severity": {"info": 0, "warning": 0, "error": 0, "critical": 0},
                 "cycle_metrics": [
-                    {
-                        "trades": 6,
-                        "expectancy_usd": 5.0,
-                        "profit_factor": 2.0,
-                        "net_pnl_usd": 30.0,
-                    }
+                    {"trades": 4, "expectancy_usd": 5.0, "profit_factor": 2.0, "net_pnl_usd": 20.0},
+                    {"trades": 4, "expectancy_usd": 5.0, "profit_factor": 2.0, "net_pnl_usd": 20.0},
+                    {"trades": 4, "expectancy_usd": 5.0, "profit_factor": 2.0, "net_pnl_usd": 20.0},
                 ],
             }
         }

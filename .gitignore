@@ -5,3 +5,10 @@ dist/
 build/
 *.pyc
 data/*.csv
+data/raw/*.csv
+data/raw/*.json
+data/processed/*.csv
+data/processed/*.json
+runs/
+*.egg-info/
+.codex

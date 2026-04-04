@@ -1,0 +1,169 @@
+{
+  "artifact_type": "strategy_profiles",
+  "checksum": "df000fe8ef3f2781d61612e84ee95c0b88069448a50b583e6e38ec671ea3d57e",
+  "compatibility": {
+    "loader": "load_symbol_strategy_profiles"
+  },
+  "generated_at": "2026-04-01T19:53:05.181789+00:00",
+  "payload": {
+    "common": {
+      "allow_long": true,
+      "allow_short": true,
+      "allowed_sessions": [
+        "asia",
+        "london",
+        "new_york"
+      ],
+      "allowed_timeframes": [
+        "M15"
+      ],
+      "max_open_positions": 4,
+      "risk_multiplier": 1.0,
+      "stop_policy": "static",
+      "target_policy": "static"
+    },
+    "symbols": {
+      "AUDUSD": {
+        "allow_long": true,
+        "allow_short": true,
+        "allowed_sessions": [
+          "asia",
+          "london",
+          "new_york"
+        ],
+        "allowed_timeframes": [
+          "M15"
+        ],
+        "enabled": true,
+        "enabled_state": "enabled",
+        "max_open_positions": 4,
+        "model_variant": "global_model",
+        "no_trade_min_expectancy_usd": 0.0,
+        "notes": "chosen_model=global_model",
+        "profile_id": "AUDUSD-20260401T193139Z_strategy_validation-ec3bf4be07",
+        "promotion_reason": "endurance_and_lifecycle_passed",
+        "promotion_state": "approved_demo",
+        "regime_filter": "off",
+        "risk_multiplier": 1.0,
+        "rollback_target": "AUDUSD-20260401T193139Z_strategy_validation-ec3bf4be07-rollback-ec3bf4be",
+        "source_run_id": "20260401T193139Z_strategy_validation",
+        "stop_atr_multiplier": 1.5,
+        "stop_max_pct": 0.01,
+        "stop_min_pct": 0.001,
+        "stop_policy": "static",
+        "symbol": "AUDUSD",
+        "target_atr_multiplier": 3.0,
+        "target_max_pct": 0.02,
+        "target_min_pct": 0.0015,
+        "target_policy": "static",
+        "threshold": 0.45
+      },
+      "EURUSD": {
+        "allow_long": true,
+        "allow_short": true,
+        "allowed_sessions": [
+          "asia",
+          "london",
+          "new_york"
+        ],
+        "allowed_timeframes": [
+          "M15"
+        ],
+        "enabled": true,
+        "enabled_state": "enabled",
+        "max_open_positions": 4,
+        "model_variant": "global_model",
+        "no_trade_min_expectancy_usd": 0.0,
+        "notes": "chosen_model=global_model",
+        "profile_id": "EURUSD-20260401T193139Z_strategy_validation-a9d9d3d361",
+        "promotion_reason": "endurance_and_lifecycle_passed",
+        "promotion_state": "approved_demo",
+        "regime_filter": "off",
+        "risk_multiplier": 1.0,
+        "rollback_target": "EURUSD-20260401T193139Z_strategy_validation-a9d9d3d361-rollback-a9d9d3d3",
+        "source_run_id": "20260401T193139Z_strategy_validation",
+        "stop_atr_multiplier": 1.5,
+        "stop_max_pct": 0.01,
+        "stop_min_pct": 0.001,
+        "stop_policy": "static",
+        "symbol": "EURUSD",
+        "target_atr_multiplier": 3.0,
+        "target_max_pct": 0.02,
+        "target_min_pct": 0.0015,
+        "target_policy": "static",
+        "threshold": 0.45
+      },
+      "GBPUSD": {
+        "allow_long": true,
+        "allow_short": true,
+        "allowed_sessions": [
+          "asia",
+          "london",
+          "new_york"
+        ],
+        "allowed_timeframes": [
+          "M15"
+        ],
+        "enabled": true,
+        "enabled_state": "enabled",
+        "max_open_positions": 4,
+        "model_variant": "global_model",
+        "no_trade_min_expectancy_usd": 0.0,
+        "notes": "chosen_model=global_model",
+        "profile_id": "GBPUSD-20260401T193139Z_strategy_validation-93126f8a98",
+        "promotion_reason": "endurance_and_lifecycle_passed",
+        "promotion_state": "approved_demo",
+        "regime_filter": "off",
+        "risk_multiplier": 1.0,
+        "rollback_target": "GBPUSD-20260401T193139Z_strategy_validation-93126f8a98-rollback-93126f8a",
+        "source_run_id": "20260401T193139Z_strategy_validation",
+        "stop_atr_multiplier": 1.5,
+        "stop_max_pct": 0.01,
+        "stop_min_pct": 0.001,
+        "stop_policy": "static",
+        "symbol": "GBPUSD",
+        "target_atr_multiplier": 3.0,
+        "target_max_pct": 0.02,
+        "target_min_pct": 0.0015,
+        "target_policy": "static",
+        "threshold": 0.45
+      },
+      "USDJPY": {
+        "allow_long": true,
+        "allow_short": true,
+        "allowed_sessions": [
+          "asia",
+          "london",
+          "new_york"
+        ],
+        "allowed_timeframes": [
+          "M15"
+        ],
+        "enabled": false,
+        "enabled_state": "disabled",
+        "max_open_positions": 4,
+        "model_variant": "global_model",
+        "no_trade_min_expectancy_usd": 0.0,
+        "notes": "chosen_model=global_model",
+        "profile_id": "USDJPY-20260401T193139Z_strategy_validation-dd9048cf92",
+        "promotion_reason": "blocked_by_default",
+        "promotion_state": "blocked",
+        "regime_filter": "off",
+        "risk_multiplier": 1.0,
+        "rollback_target": null,
+        "source_run_id": "20260401T193139Z_strategy_validation",
+        "stop_atr_multiplier": 1.5,
+        "stop_max_pct": 0.01,
+        "stop_min_pct": 0.001,
+        "stop_policy": "static",
+        "symbol": "USDJPY",
+        "target_atr_multiplier": 3.0,
+        "target_max_pct": 0.02,
+        "target_min_pct": 0.0015,
+        "target_policy": "static",
+        "threshold": 0.45
+      }
+    }
+  },
+  "schema_version": 2
+}

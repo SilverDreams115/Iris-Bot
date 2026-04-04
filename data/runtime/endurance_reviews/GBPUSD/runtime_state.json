@@ -1,0 +1,253 @@
+{
+  "latest_broker_sync_result": {
+    "balance_usd": null,
+    "closed_trades": [],
+    "connected": false,
+    "equity_usd": null,
+    "pending_orders": [],
+    "positions": [],
+    "raw_account": {},
+    "scope_report": {}
+  },
+  "saved_at": "2026-04-01T19:46:58.058112+00:00",
+  "state": {
+    "account_state": {
+      "balance_usd": 1011.6399999999975,
+      "cash_usd": 1011.6399999999975,
+      "equity_usd": 1011.6399999999975
+    },
+    "blocked_reasons": [],
+    "blocked_trades_summary": {
+      "position_duplicate": 15
+    },
+    "broker_sync_status": {
+      "critical_discrepancy_count": 0,
+      "last_sync_timestamp": "2026-04-01T19:46:58.058092+00:00",
+      "reconciliation_policy": "hard_fail",
+      "state": "degraded"
+    },
+    "closed_positions": [
+      {
+        "active_profile_id": "",
+        "bars_held": 8,
+        "direction": 1,
+        "enablement_state": "unknown",
+        "entry_price": 1.2390800000000002,
+        "entry_timestamp": "2026-01-05T00:15:00",
+        "exit_price": 1.24012,
+        "exit_reason": "time_exit",
+        "exit_timestamp": "2026-01-05T02:00:00",
+        "gross_pnl_usd": 4.159999999998831,
+        "is_intrabar_ambiguous": false,
+        "model_variant": "global_model",
+        "net_pnl_usd": 3.8799999999988315,
+        "probability_long": 0.9855146408081055,
+        "probability_short": 2.53146652084979e-07,
+        "profile_source_run_id": "",
+        "promotion_state": "unknown",
+        "signal_timestamp": "2026-01-05T00:00:00",
+        "slippage_cost_usd": 0.1600000000010482,
+        "spread_cost_usd": 0.47999999999959186,
+        "stop_loss_price": 1.2366018400000003,
+        "stop_policy": "static",
+        "stop_policy_details": {
+          "atr_distance": 0.0017998257159540004,
+          "atr_fraction": 0.0009683667,
+          "direction": 1,
+          "entry_price": 1.2390800000000002,
+          "final_distance": 0.0024781600000000005,
+          "floor_distance": 0.0024781600000000005,
+          "policy": "static"
+        },
+        "symbol": "GBPUSD",
+        "take_profit_price": 1.2427972400000002,
+        "target_policy": "static",
+        "target_policy_details": {
+          "atr_distance": 0.003599651431908001,
+          "atr_fraction": 0.0009683667,
+          "direction": 1,
+          "entry_price": 1.2390800000000002,
+          "final_distance": 0.0037172400000000006,
+          "floor_distance": 0.0037172400000000006,
+          "policy": "static"
+        },
+        "timeframe": "M15",
+        "total_commission_usd": 0.28,
+        "volume_lots": 0.04
+      },
+      {
+        "active_profile_id": "",
+        "bars_held": 8,
+        "direction": 1,
+        "enablement_state": "unknown",
+        "entry_price": 1.2394800000000001,
+        "entry_timestamp": "2026-01-05T02:45:00",
+        "exit_price": 1.2405199999999998,
+        "exit_reason": "time_exit",
+        "exit_timestamp": "2026-01-05T04:30:00",
+        "gross_pnl_usd": 4.159999999998831,
+        "is_intrabar_ambiguous": false,
+        "model_variant": "global_model",
+        "net_pnl_usd": 3.8799999999988315,
+        "probability_long": 0.9846343398094177,
+        "probability_short": 2.5861658059511683e-07,
+        "profile_source_run_id": "",
+        "promotion_state": "unknown",
+        "signal_timestamp": "2026-01-05T02:30:00",
+        "slippage_cost_usd": 0.1600000000010482,
+        "spread_cost_usd": 0.47999999999959186,
+        "stop_loss_price": 1.2370010400000002,
+        "stop_policy": "static",
+        "stop_policy_details": {
+          "atr_distance": 0.001799825729724,
+          "atr_fraction": 0.0009680542,
+          "direction": 1,
+          "entry_price": 1.2394800000000001,
+          "final_distance": 0.0024789600000000005,
+          "floor_distance": 0.0024789600000000005,
+          "policy": "static"
+        },
+        "symbol": "GBPUSD",
+        "take_profit_price": 1.2431984400000002,
+        "target_policy": "static",
+        "target_policy_details": {
+          "atr_distance": 0.003599651459448,
+          "atr_fraction": 0.0009680542,
+          "direction": 1,
+          "entry_price": 1.2394800000000001,
+          "final_distance": 0.0037184400000000004,
+          "floor_distance": 0.0037184400000000004,
+          "policy": "static"
+        },
+        "timeframe": "M15",
+        "total_commission_usd": 0.28,
+        "volume_lots": 0.04
+      },
+      {
+        "active_profile_id": "",
+        "bars_held": 8,
+        "direction": 1,
+        "enablement_state": "unknown",
+        "entry_price": 1.24088,
+        "entry_timestamp": "2026-01-05T04:45:00",
+        "exit_price": 1.24192,
+        "exit_reason": "time_exit",
+        "exit_timestamp": "2026-01-05T06:30:00",
+        "gross_pnl_usd": 4.1599999999997195,
+        "is_intrabar_ambiguous": false,
+        "model_variant": "global_model",
+        "net_pnl_usd": 3.8799999999997197,
+        "probability_long": 0.9855146408081055,
+        "probability_short": 2.53146652084979e-07,
+        "profile_source_run_id": "",
+        "promotion_state": "unknown",
+        "signal_timestamp": "2026-01-05T04:30:00",
+        "slippage_cost_usd": 0.1600000000010482,
+        "spread_cost_usd": 0.47999999999959186,
+        "stop_loss_price": 1.23839824,
+        "stop_policy": "static",
+        "stop_policy_details": {
+          "atr_distance": 0.0017998258959719998,
+          "atr_fraction": 0.0009669621,
+          "direction": 1,
+          "entry_price": 1.24088,
+          "final_distance": 0.00248176,
+          "floor_distance": 0.00248176,
+          "policy": "static"
+        },
+        "symbol": "GBPUSD",
+        "take_profit_price": 1.24460264,
+        "target_policy": "static",
+        "target_policy_details": {
+          "atr_distance": 0.0035996517919439997,
+          "atr_fraction": 0.0009669621,
+          "direction": 1,
+          "entry_price": 1.24088,
+          "final_distance": 0.00372264,
+          "floor_distance": 0.00372264,
+          "policy": "static"
+        },
+        "timeframe": "M15",
+        "total_commission_usd": 0.28,
+        "volume_lots": 0.04
+      }
+    ],
+    "cooldown_tracker": {},
+    "current_session_status": {
+      "last_timestamp": "2026-01-05T06:45:00",
+      "mode": "paper",
+      "session_id": "",
+      "status": "completed"
+    },
+    "daily_loss_tracker": {
+      "blocked": false,
+      "current_day": "2026-01-05",
+      "loss_limit_usd": 0.0,
+      "realized_pnl_usd": 11.639999999997382
+    },
+    "exposure": {
+      "gross_volume_lots": 0,
+      "open_positions": 0,
+      "symbols": []
+    },
+    "last_signal_per_symbol": {
+      "GBPUSD": {
+        "probability_long": 0.027649015188217163,
+        "probability_short": 3.4735916187855764e-07,
+        "signal": 0,
+        "threshold": 0.45,
+        "timestamp": "2026-01-05T06:45:00"
+      }
+    },
+    "latest_broker_snapshot": {
+      "balance_usd": null,
+      "closed_trades": [],
+      "connected": false,
+      "equity_usd": null,
+      "pending_orders": [],
+      "positions": [],
+      "raw_account": {},
+      "scope_report": {}
+    },
+    "open_positions": {},
+    "pending_intents": [],
+    "processing_state": {
+      "idempotency_mode_counts": {
+        "timestamp_fallback": 28
+      },
+      "last_processed_timestamp_by_symbol": {
+        "GBPUSD": "2026-01-05T06:45:00"
+      },
+      "processed_event_ids": [
+        "fallback:GBPUSD:2026-01-05T00:00:00",
+        "fallback:GBPUSD:2026-01-05T00:15:00",
+        "fallback:GBPUSD:2026-01-05T00:30:00",
+        "fallback:GBPUSD:2026-01-05T00:45:00",
+        "fallback:GBPUSD:2026-01-05T01:00:00",
+        "fallback:GBPUSD:2026-01-05T01:15:00",
+        "fallback:GBPUSD:2026-01-05T01:30:00",
+        "fallback:GBPUSD:2026-01-05T01:45:00",
+        "fallback:GBPUSD:2026-01-05T02:00:00",
+        "fallback:GBPUSD:2026-01-05T02:15:00",
+        "fallback:GBPUSD:2026-01-05T02:30:00",
+        "fallback:GBPUSD:2026-01-05T02:45:00",
+        "fallback:GBPUSD:2026-01-05T03:00:00",
+        "fallback:GBPUSD:2026-01-05T03:15:00",
+        "fallback:GBPUSD:2026-01-05T03:30:00",
+        "fallback:GBPUSD:2026-01-05T03:45:00",
+        "fallback:GBPUSD:2026-01-05T04:00:00",
+        "fallback:GBPUSD:2026-01-05T04:15:00",
+        "fallback:GBPUSD:2026-01-05T04:30:00",
+        "fallback:GBPUSD:2026-01-05T04:45:00",
+        "fallback:GBPUSD:2026-01-05T05:00:00",
+        "fallback:GBPUSD:2026-01-05T05:15:00",
+        "fallback:GBPUSD:2026-01-05T05:30:00",
+        "fallback:GBPUSD:2026-01-05T05:45:00",
+        "fallback:GBPUSD:2026-01-05T06:00:00",
+        "fallback:GBPUSD:2026-01-05T06:15:00",
+        "fallback:GBPUSD:2026-01-05T06:30:00",
+        "fallback:GBPUSD:2026-01-05T06:45:00"
+      ]
+    }
+  }
+}

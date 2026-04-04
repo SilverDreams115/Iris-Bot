@@ -16,6 +16,7 @@ class Bar:
     low: float
     close: float
     volume: float
+    spread: float = 0.0
 
 
 def load_bars(csv_path: Path) -> list[Bar]:
@@ -37,6 +38,7 @@ def load_bars(csv_path: Path) -> list[Bar]:
                 low=float(row["low"]),
                 close=float(row["close"]),
                 volume=float(row.get("volume", 0.0)),
+                spread=float(row.get("spread", 0.0)),
             )
         )
     return bars
@@ -57,7 +59,7 @@ def write_bars(csv_path: Path, bars: list[Bar]) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["timestamp", "symbol", "timeframe", "open", "high", "low", "close", "volume"])
+        writer.writerow(["timestamp", "symbol", "timeframe", "open", "high", "low", "close", "volume", "spread"])
         for bar in sorted(bars, key=lambda item: (item.symbol, item.timeframe, item.timestamp)):
             writer.writerow(
                 [
@@ -69,5 +71,6 @@ def write_bars(csv_path: Path, bars: list[Bar]) -> None:
                     f"{bar.low:.10f}",
                     f"{bar.close:.10f}",
                     f"{bar.volume:.2f}",
+                    f"{bar.spread:.4f}",
                 ]
             )

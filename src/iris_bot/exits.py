@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
 from iris_bot.config import BacktestConfig, DynamicExitConfig, RiskConfig
 from iris_bot.processed_dataset import ProcessedRow
+
+# ATR feature names used for dynamic exit calculations.
+# Update here if the feature schema changes.
+ATR_FEATURE_LONG = "atr_10"
+ATR_FEATURE_SHORT = "atr_5"
 
 
 @dataclass(frozen=True)
@@ -26,9 +32,10 @@ class SymbolExitProfile:
     target_max_pct: float | None = None
 
 
-class StopPolicy:
+class StopPolicy(ABC):
     name = "static"
 
+    @abstractmethod
     def stop_loss_price(
         self,
         row: ProcessedRow,
@@ -38,13 +45,13 @@ class StopPolicy:
         risk: RiskConfig,
         dynamic_config: DynamicExitConfig,
         symbol_profile: SymbolExitProfile | None = None,
-    ) -> ExitLevel:
-        raise NotImplementedError
+    ) -> ExitLevel: ...
 
 
-class TargetPolicy:
+class TargetPolicy(ABC):
     name = "static"
 
+    @abstractmethod
     def take_profit_price(
         self,
         row: ProcessedRow,
@@ -54,14 +61,13 @@ class TargetPolicy:
         risk: RiskConfig,
         dynamic_config: DynamicExitConfig,
         symbol_profile: SymbolExitProfile | None = None,
-    ) -> ExitLevel:
-        raise NotImplementedError
+    ) -> ExitLevel: ...
 
 
 def _atr_fraction(row: ProcessedRow) -> float:
     return max(
-        float(row.features.get("atr_10", 0.0)),
-        float(row.features.get("atr_5", 0.0)),
+        float(row.features.get(ATR_FEATURE_LONG, 0.0)),
+        float(row.features.get(ATR_FEATURE_SHORT, 0.0)),
         0.0,
     )
 

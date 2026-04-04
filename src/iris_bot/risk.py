@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+_log = logging.getLogger(__name__)
 
 
 class ConversionRateError(Exception):
@@ -193,7 +196,8 @@ def calculate_position_size(
         quote_to_account = quote_to_account_rate(
             instrument.symbol, entry_price, instrument.account_currency, aux_rates
         )
-    except ConversionRateError:
+    except ConversionRateError as exc:
+        _log.warning("calculate_lot_size blocked for %s: %s", instrument.symbol, exc)
         return 0.0
 
     stop_risk_usd_per_lot = stop_distance * instrument.contract_size * quote_to_account

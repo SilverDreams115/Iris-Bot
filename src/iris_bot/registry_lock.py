@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Generator
@@ -93,10 +94,10 @@ def registry_exclusive_lock(
                     )
                 time.sleep(min(0.05, remaining))
 
-        # Lock acquired — write holder metadata for auditability
+        # Lock acquired — write holder metadata for auditability and stale detection
         fh.seek(0)
         fh.truncate()
-        fh.write(f"locked_at={time.time():.6f}\n")
+        fh.write(f"locked_at={time.time():.6f}\npid={os.getpid()}\n")
         fh.flush()
 
         # Conflict detection: verify registry has not been mutated since caller's read
@@ -137,10 +138,19 @@ def governance_lock_audit(registry_path: Path) -> dict:
     lock_exists = lock_path.exists()
     lock_held = False
     lock_content = ""
+    lock_pid: int | None = None
+    lock_stale = False
 
     if lock_exists:
         try:
             lock_content = lock_path.read_text(encoding="utf-8").strip()
+            # Parse PID from lock file content
+            for line in lock_content.splitlines():
+                if line.startswith("pid="):
+                    try:
+                        lock_pid = int(line.split("=", 1)[1])
+                    except ValueError:
+                        pass
             fh = lock_path.open("r", encoding="utf-8")
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -148,6 +158,14 @@ def governance_lock_audit(registry_path: Path) -> dict:
                 lock_held = False
             except BlockingIOError:
                 lock_held = True
+                # Check if the holding process is still alive
+                if lock_pid is not None:
+                    try:
+                        os.kill(lock_pid, 0)
+                    except ProcessLookupError:
+                        lock_stale = True
+                    except PermissionError:
+                        pass  # Process exists but we can't signal it
             finally:
                 fh.close()
         except OSError:
@@ -161,6 +179,8 @@ def governance_lock_audit(registry_path: Path) -> dict:
         "lock_path": str(lock_path),
         "lock_file_exists": lock_exists,
         "lock_currently_held": lock_held,
+        "lock_pid": lock_pid,
+        "lock_stale": lock_stale,
         "lock_content": lock_content,
         "registry_exists": registry_exists,
         "registry_etag": registry_etag_value,

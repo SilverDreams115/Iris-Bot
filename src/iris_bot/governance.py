@@ -400,7 +400,7 @@ def validate_strategy_profiles(settings: Settings) -> int:
             _sync_strategy_profiles_file(settings, registry)
             _materialize_active_profiles_from_registry(settings, registry)
     except RegistryMutationConflictError as exc:
-        logger.error("Conflicto de mutación concurrente en validate_strategy_profiles: %s", exc)
+        logger.error("Concurrent mutation conflict in validate_strategy_profiles: %s", exc)
         return 5
     except RegistryLockTimeoutError as exc:
         logger.error("Timeout adquiriendo lock del registry en validate_strategy_profiles: %s", exc)
@@ -1038,7 +1038,7 @@ def promote_strategy_profile(settings: Settings) -> int:
             report_final_state = profile["promotion_state"] if final_state != "KEEP_VALIDATED" else "validated"
 
     except RegistryMutationConflictError as exc:
-        logger.error("Conflicto de mutación concurrente en promote_strategy_profile para %s: %s", symbol, exc)
+        logger.error("Concurrent mutation conflict in promote_strategy_profile for %s: %s", symbol, exc)
         return 5
     except RegistryLockTimeoutError as exc:
         logger.error("Timeout adquiriendo lock del registry para promote %s: %s", symbol, exc)
@@ -1139,7 +1139,7 @@ def rollback_strategy_profile(settings: Settings) -> int:
             report_restored_id = target_entry["profile_id"]
 
     except RegistryMutationConflictError as exc:
-        logger.error("Conflicto de mutación concurrente en rollback para %s: %s", symbol, exc)
+        logger.error("Concurrent mutation conflict in rollback for %s: %s", symbol, exc)
         return 5
     except RegistryLockTimeoutError as exc:
         logger.error("Timeout adquiriendo lock del registry para rollback %s: %s", symbol, exc)

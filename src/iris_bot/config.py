@@ -282,9 +282,9 @@ class BacktestConfig:
     allow_long: bool = True
     allow_short: bool = True
     intrabar_policy: str = "conservative"
-    # Política para cuando SL y TP se tocan en la misma vela:
-    #   "conservative" → gana el stop loss  (peor resultado para el trader)
-    #   "optimistic"   → gana el take profit (mejor resultado para el trader)
+    # Policy for when SL and TP are touched on the same bar:
+    #   "conservative" → stop loss wins  (worst outcome for the trader)
+    #   "optimistic"   → take profit wins (best outcome for the trader)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -551,6 +551,48 @@ class Settings:
     xgboost: XGBoostConfig = field(default_factory=XGBoostConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+
+
+def validate_config(s: "Settings") -> list[str]:
+    """
+    Cross-validates config dependencies. Returns a list of error strings.
+    Empty list means the config is valid.
+    """
+    errors: list[str] = []
+
+    # MT5: if enabled, credentials must be present
+    if s.mt5.enabled:
+        if not s.mt5.login:
+            errors.append("mt5.enabled=True but IRIS_MT5_LOGIN is not set")
+        if not s.mt5.password:
+            errors.append("mt5.enabled=True but IRIS_MT5_PASSWORD is not set")
+        if not s.mt5.server:
+            errors.append("mt5.enabled=True but IRIS_MT5_SERVER is not set")
+
+    # Risk: sanity bounds
+    if not (0 < s.risk.risk_per_trade <= 0.5):
+        errors.append(f"risk_per_trade={s.risk.risk_per_trade} is outside (0, 0.5]")
+    if s.risk.max_open_positions < 1:
+        errors.append(f"max_open_positions={s.risk.max_open_positions} must be >= 1")
+
+    # Trading: primary timeframe must be in configured timeframes
+    if s.trading.primary_timeframe not in s.trading.timeframes:
+        errors.append(
+            f"primary_timeframe={s.trading.primary_timeframe!r} not in timeframes={s.trading.timeframes}"
+        )
+
+    # Split ratios must sum to ~1.0
+    ratio_sum = s.split.train_ratio + s.split.validation_ratio + s.split.test_ratio
+    if abs(ratio_sum - 1.0) > 0.01:
+        errors.append(f"split ratios sum to {ratio_sum:.3f}, expected 1.0")
+
+    # Gate floors: basic sanity
+    if s.approved_demo_gate.min_profit_factor < 1.0:
+        errors.append(
+            f"approved_demo_gate.min_profit_factor={s.approved_demo_gate.min_profit_factor} should be >= 1.0"
+        )
+
+    return errors
 
 
 settings = load_settings()

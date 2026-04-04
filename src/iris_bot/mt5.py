@@ -377,7 +377,7 @@ class MT5Client:
             issue = MT5ValidationIssue(
                 scope=f"symbol:{order.symbol}",
                 code="tick_unavailable",
-                message="No hay tick disponible",
+                message="No tick available",
                 details={},
             )
             return DryRunOrderResult(False, "tick_unavailable", normalized_volume, None, issues + [issue])

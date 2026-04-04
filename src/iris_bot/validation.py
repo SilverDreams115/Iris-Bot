@@ -72,7 +72,7 @@ def validate_bars(bars: list[Bar]) -> ValidationReport:
             if any(value is None for value in (bar.open, bar.high, bar.low, bar.close)):
                 missing_ohlc += 1
                 issues.append(
-                    ValidationIssue("error", symbol, timeframe, "missing_ohlc", f"Barra con OHLC faltante en {bar.timestamp.isoformat()}")
+                    ValidationIssue("error", symbol, timeframe, "missing_ohlc", f"Bar with missing OHLC en {bar.timestamp.isoformat()}")
                 )
             if not (bar.low <= min(bar.open, bar.close) and bar.high >= max(bar.open, bar.close) and bar.low <= bar.high):
                 invalid_ohlc += 1

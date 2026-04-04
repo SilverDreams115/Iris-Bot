@@ -16,7 +16,9 @@ class XGBoostModelMetadata:
     feature_names: list[str]
     num_boost_round: int
     best_iteration: int | None
+    best_score: float | None
     classes: dict[str, int]
+    feature_importance: dict[str, float]
 
 
 class XGBoostMultiClassModel:
@@ -24,6 +26,8 @@ class XGBoostMultiClassModel:
         self.config = config
         self.booster = None
         self.best_iteration: int | None = None
+        self.best_score: float | None = None
+        self._feature_names: list[str] = []
 
     def fit(
         self,
@@ -31,17 +35,29 @@ class XGBoostMultiClassModel:
         train_labels: list[int],
         validation_rows: list[list[float]],
         validation_labels: list[int],
+        feature_names: list[str] | None = None,
     ) -> None:
         try:
             import xgboost as xgb  # type: ignore
         except ImportError as exc:
-            raise RuntimeError("xgboost no esta instalado") from exc
+            raise RuntimeError("xgboost is not installed") from exc
 
-        dtrain = xgb.DMatrix(train_rows, label=[LABEL_TO_CLASS[label] for label in train_labels])
-        dvalid = xgb.DMatrix(validation_rows, label=[LABEL_TO_CLASS[label] for label in validation_labels])
+        if not train_rows:
+            raise ValueError("train_rows is empty")
+        if len(train_rows) != len(train_labels):
+            raise ValueError(
+                f"train_rows length {len(train_rows)} != train_labels length {len(train_labels)}"
+            )
+
+        mapped_train = [LABEL_TO_CLASS[label] for label in train_labels]
+        mapped_valid = [LABEL_TO_CLASS[label] for label in validation_labels]
+
+        dtrain = xgb.DMatrix(train_rows, label=mapped_train, feature_names=feature_names)
+        dvalid = xgb.DMatrix(validation_rows, label=mapped_valid, feature_names=feature_names)
+
         params = {
             "objective": "multi:softprob",
-            "num_class": 3,
+            "num_class": len(LABEL_TO_CLASS),
             "eta": self.config.eta,
             "max_depth": self.config.max_depth,
             "min_child_weight": self.config.min_child_weight,
@@ -52,22 +68,43 @@ class XGBoostMultiClassModel:
             "seed": self.config.seed,
             "eval_metric": "mlogloss",
         }
+
+        callbacks = [
+            xgb.callback.EarlyStopping(
+                rounds=self.config.early_stopping_rounds,
+                save_best=True,
+                maximize=False,
+                data_name="validation",
+            )
+        ]
+
         self.booster = xgb.train(
             params=params,
             dtrain=dtrain,
             num_boost_round=self.config.num_boost_round,
             evals=[(dtrain, "train"), (dvalid, "validation")],
-            early_stopping_rounds=self.config.early_stopping_rounds,
+            callbacks=callbacks,
             verbose_eval=False,
         )
         self.best_iteration = getattr(self.booster, "best_iteration", None)
+        self.best_score = getattr(self.booster, "best_score", None)
+        self._feature_names = feature_names or []
+
+    def feature_importance(self, importance_type: str = "gain") -> dict[str, float]:
+        """Returns per-feature importance scores (gain by default)."""
+        if self.booster is None:
+            return {}
+        try:
+            return self.booster.get_score(importance_type=importance_type)
+        except Exception:
+            return {}
 
     def predict_probabilities(self, rows: list[list[float]]) -> list[dict[int, float]]:
         if self.booster is None:
-            raise RuntimeError("El modelo XGBoost no ha sido entrenado")
+            raise RuntimeError("XGBoost model has not been trained")
         import xgboost as xgb  # type: ignore
 
-        matrix = xgb.DMatrix(rows)
+        matrix = xgb.DMatrix(rows, feature_names=self._feature_names or None)
         probabilities = self.booster.predict(matrix)
         results: list[dict[int, float]] = []
         for row in probabilities:
@@ -76,14 +113,16 @@ class XGBoostMultiClassModel:
 
     def save(self, model_path: Path, metadata_path: Path, feature_names: list[str]) -> None:
         if self.booster is None:
-            raise RuntimeError("No hay modelo para guardar")
+            raise RuntimeError("No model to save")
         model_path.parent.mkdir(parents=True, exist_ok=True)
         self.booster.save_model(model_path)
         metadata = XGBoostModelMetadata(
             feature_names=feature_names,
             num_boost_round=self.config.num_boost_round,
             best_iteration=self.best_iteration,
+            best_score=self.best_score,
             classes={str(label): klass for label, klass in LABEL_TO_CLASS.items()},
+            feature_importance=self.feature_importance(),
         )
         metadata_path.write_text(json.dumps(asdict(metadata), indent=2, sort_keys=True), encoding="utf-8")
 
@@ -91,7 +130,17 @@ class XGBoostMultiClassModel:
         try:
             import xgboost as xgb  # type: ignore
         except ImportError as exc:
-            raise RuntimeError("xgboost no esta instalado") from exc
+            raise RuntimeError("xgboost is not installed") from exc
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_path}")
         booster = xgb.Booster()
         booster.load_model(model_path)
         self.booster = booster
+        # Restore feature names from metadata if available
+        metadata_path = model_path.with_name("xgboost_metadata.json")
+        if metadata_path.exists():
+            try:
+                meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+                self._feature_names = meta.get("feature_names", [])
+            except (OSError, json.JSONDecodeError, KeyError):
+                pass

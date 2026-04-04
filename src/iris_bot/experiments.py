@@ -65,7 +65,7 @@ def run_experiment(settings: Settings) -> int:
     )
     rows = _filter_rows(dataset, settings)
     if len(rows) < 30:
-        logger.error("No hay suficientes filas procesadas para experimento: %s", len(rows))
+        logger.error("Insufficient processed rows for experiment: %s", len(rows))
         return 1
 
     split = temporal_train_validation_test_split(
@@ -93,7 +93,7 @@ def run_experiment(settings: Settings) -> int:
 
     xgb_model = XGBoostMultiClassModel(settings.xgboost)
     try:
-        xgb_model.fit(train_matrix, train_labels, validation_matrix, validation_labels)
+        xgb_model.fit(train_matrix, train_labels, validation_matrix, validation_labels, feature_names=feature_names)
     except RuntimeError as exc:
         logger.error(str(exc))
         return 2
@@ -182,6 +182,9 @@ def run_experiment(settings: Settings) -> int:
             "xgboost": {
                 "threshold": asdict(threshold_result),
                 "metrics": xgb_metrics,
+                "best_iteration": xgb_model.best_iteration,
+                "best_score": xgb_model.best_score,
+                "feature_importance": xgb_model.feature_importance(),
             },
             "walk_forward": walk_forward_payload,
         },

@@ -58,7 +58,9 @@
       "Bash(grep -rn \"# noqa: F401\\\\|No hay\\\\|No existe\\\\|no esta\\\\b\\\\|invalido\\\\b\\\\|no soportado\\\\b\" src/iris_bot/*.pys)",
       "Bash(ls *.md)",
       "Bash(ls *.txt)",
-      "Bash(ls *.rst)"
+      "Bash(ls *.rst)",
+      "Bash(PYTHONPATH=src .venv/bin/python -m iris_bot.main audit-symbol-signals)",
+      "Bash(PYTHONPATH=src .venv/bin/python -m iris_bot.main run-symbol-structural-reworks)"
     ]
   }
 }

@@ -1,0 +1,116 @@
+{
+  "artifact_type": "model_artifact_manifest",
+  "checksum": "28a1e2279925359b253038dc764275e2c2ffdb36cea8b2a2a0ae7262b3be8720",
+  "compatibility": {
+    "loader": "load_model_artifact_manifest"
+  },
+  "generated_at": "2026-04-06T04:39:47.749169+00:00",
+  "payload": {
+    "base_profile_snapshot": {
+      "allow_long": true,
+      "allow_short": true,
+      "allowed_sessions": [
+        "asia",
+        "london",
+        "new_york"
+      ],
+      "allowed_timeframes": [
+        "M15"
+      ],
+      "enabled_state": "enabled",
+      "max_open_positions": 4,
+      "model_variant": "global_model",
+      "no_trade_min_expectancy_usd": 0.0,
+      "notes": "chosen_model=global_model",
+      "profile_id": "AUDUSD-20260401T193139Z_strategy_validation-ec3bf4be07",
+      "promotion_reason": "endurance_and_lifecycle_passed",
+      "promotion_state": "approved_demo",
+      "regime_filter": "off",
+      "risk_multiplier": 1.0,
+      "rollback_target": "AUDUSD-20260401T193139Z_strategy_validation-ec3bf4be07-rollback-ec3bf4be",
+      "source_run_id": "20260401T193139Z_strategy_validation",
+      "stop_atr_multiplier": 1.5,
+      "stop_max_pct": 0.01,
+      "stop_min_pct": 0.001,
+      "stop_policy": "static",
+      "symbol": "AUDUSD",
+      "target_atr_multiplier": 3.0,
+      "target_max_pct": 0.02,
+      "target_min_pct": 0.0015,
+      "target_policy": "static",
+      "threshold": 0.45
+    },
+    "evaluation_summary": {
+      "test": {
+        "expectancy_usd": -2.220005673229051,
+        "max_drawdown_usd": 79.01019856301741,
+        "net_pnl_usd": -77.70019856301678,
+        "no_trade_ratio": 0.32432432432432434,
+        "profit_factor": 0.4620599593491063,
+        "row_count": 296,
+        "threshold": 0.4,
+        "trade_count": 35
+      },
+      "walk_forward": {
+        "mean_expectancy_usd": -1.6778725641594967,
+        "mean_no_trade_ratio": 0.19464285714285715,
+        "mean_profit_factor": 0.7637447996279338,
+        "net_pnl_stddev": 29.3823193585616,
+        "total_net_pnl_usd": -234.3704426586977,
+        "worst_fold_drawdown_usd": 57.165572513584266
+      }
+    },
+    "feature_count": 32,
+    "feature_names": [
+      "return_1",
+      "return_3",
+      "return_5",
+      "log_return_1",
+      "momentum_3",
+      "momentum_5",
+      "rolling_volatility_5",
+      "rolling_volatility_10",
+      "atr_5",
+      "atr_10",
+      "parkinson_volatility_10",
+      "range_ratio",
+      "body_ratio",
+      "upper_wick_ratio",
+      "lower_wick_ratio",
+      "distance_to_sma_5",
+      "distance_to_sma_10",
+      "efficiency_ratio_10",
+      "efficiency_ratio_50",
+      "return_autocorr_10",
+      "return_autocorr_3",
+      "return_autocorr_5",
+      "variance_ratio_hurst_proxy",
+      "volume_zscore_20",
+      "volume_percentile_20",
+      "atr_regime_percentile",
+      "session_asia",
+      "session_london",
+      "session_new_york",
+      "cross_momentum_agreement",
+      "usd_strength_index",
+      "currency_strength_rank"
+    ],
+    "metadata_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/AUDUSD/xgboost_metadata.json",
+    "metadata_sha256": "08a16dc335ecc85724f00bd41f60045f19b13da74d2e847f921ddb022923c4fb",
+    "model_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/AUDUSD/xgboost_model.json",
+    "model_sha256": "7f5dbd1e54261b8b12d8bd9de9379ca8fb9bb71b60b88292c43493860add2958",
+    "model_variant": "symbol_specific",
+    "runtime_compatibility": {
+      "primary_timeframe": "M15",
+      "stop_policy": "static",
+      "target_policy": "static"
+    },
+    "schema_version": 1,
+    "source_run_dir": "/home/silver/projects/IRIS-Bot/runs/20260406T041027Z_experiment_matrix",
+    "symbol": "AUDUSD",
+    "threshold": 0.4,
+    "threshold_metric": "macro_f1",
+    "threshold_value": 0.3770764855174229
+  },
+  "schema_version": 1
+}

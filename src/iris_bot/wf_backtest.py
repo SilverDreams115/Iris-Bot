@@ -160,6 +160,7 @@ def run_walkforward_economic_backtest(
     run_dir: Path,
     logger: logging.Logger,
     aux_rates: dict[str, float] | None = None,
+    persist_artifacts: bool = True,
 ) -> dict[str, object]:
     """
     Execute a fold-by-fold economic backtest using walk-forward windows.
@@ -172,6 +173,8 @@ def run_walkforward_economic_backtest(
     run_dir:       Root directory for fold artifacts.
     logger:        Logger instance.
     aux_rates:     Optional currency conversion rates for cross pairs.
+    persist_artifacts:
+                  When False, evaluates folds without writing per-fold artifacts.
 
     Returns
     -------
@@ -283,6 +286,7 @@ def run_walkforward_economic_backtest(
             labels=val_labels,
             grid=settings.threshold.grid,
             metric_name=settings.threshold.objective_metric,
+            refinement_steps=settings.threshold.refinement_steps,
         )
 
         # Economic replay on fold test set
@@ -313,12 +317,6 @@ def run_walkforward_economic_backtest(
             )
 
         # Save fold artifacts
-        fold_dir = run_dir / f"fold_{fold_index:02d}"
-        fold_dir.mkdir(parents=True, exist_ok=True)
-        if trades:
-            write_trade_log(fold_dir / "trade_log.csv", trades)
-        write_equity_curve(fold_dir / "equity_curve.csv", equity_curve)
-
         fold_report: dict[str, object] = {
             "fold": fold_index,
             "skipped": False,
@@ -334,7 +332,13 @@ def run_walkforward_economic_backtest(
             "trade_count": len(trades),
             "consistency": consistency.to_dict(),
         }
-        write_json_report(fold_dir, "fold_report.json", fold_report)
+        if persist_artifacts:
+            fold_dir = run_dir / f"fold_{fold_index:02d}"
+            fold_dir.mkdir(parents=True, exist_ok=True)
+            if trades:
+                write_trade_log(fold_dir / "trade_log.csv", trades)
+            write_equity_curve(fold_dir / "equity_curve.csv", equity_curve)
+            write_json_report(fold_dir, "fold_report.json", fold_report)
         fold_reports.append(fold_report)
 
         summary = WalkForwardFoldSummary(
@@ -345,14 +349,14 @@ def run_walkforward_economic_backtest(
             val_rows=len(val_rows),
             test_rows=len(test_rows),
             threshold=threshold_result.threshold,
-            total_trades=int(metrics["total_trades"]),
-            net_pnl_usd=float(metrics["net_pnl_usd"]),
-            win_rate=float(metrics["win_rate"]),
-            profit_factor=float(metrics["profit_factor"]),
-            max_drawdown_usd=float(metrics["max_drawdown_usd"]),
-            return_pct=float(metrics["return_pct"]),
-            intrabar_ambiguous_count=int(metrics.get("intrabar_ambiguous_count", 0)),
-            blocked_entry_count=int(metrics.get("blocked_entry_count", 0)),
+            total_trades=_metric_int(metrics, "total_trades"),
+            net_pnl_usd=_metric_float(metrics, "net_pnl_usd"),
+            win_rate=_metric_float(metrics, "win_rate"),
+            profit_factor=_metric_float(metrics, "profit_factor"),
+            max_drawdown_usd=_metric_float(metrics, "max_drawdown_usd"),
+            return_pct=_metric_float(metrics, "return_pct"),
+            intrabar_ambiguous_count=_metric_int(metrics, "intrabar_ambiguous_count"),
+            blocked_entry_count=_metric_int(metrics, "blocked_entry_count"),
             consistency_is_clean=consistency.is_clean,
             consistency_errors=consistency.error_count,
             consistency_warnings=consistency.warning_count,
@@ -382,3 +386,21 @@ def run_walkforward_economic_backtest(
         "valid_folds": len(valid_summaries),
         "skipped_folds": len(fold_summaries) - len(valid_summaries),
     }
+def _metric_float(metrics: dict[str, object], key: str, default: float = 0.0) -> float:
+    value = metrics.get(key, default)
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _metric_int(metrics: dict[str, object], key: str, default: int = 0) -> int:
+    value = metrics.get(key, default)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default

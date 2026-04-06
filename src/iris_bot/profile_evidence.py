@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.artifacts import read_artifact_payload
 from iris_bot.config import Settings
@@ -23,9 +23,31 @@ from iris_bot.profile_registry import _latest_run
 
 def _is_within_project(settings: Settings, path: Path) -> bool:
     """Returns True if path is within the project root or any configured data directory."""
-    resolved = path.resolve()
-    roots = [settings.project_root.resolve(), settings.data.runs_dir.resolve()]
+    raw = str(path)
+    normalized = raw.replace("\\", "/").rstrip("/")
+    roots = [
+        str(settings.project_root).replace("\\", "/").rstrip("/"),
+        str(settings.data.runs_dir).replace("\\", "/").rstrip("/"),
+    ]
+    if normalized in roots:
+        return True
     for root in roots:
+        if normalized.startswith(root + "/"):
+            return True
+    # Cross-platform WSL compatibility: compare the Linux /home/... suffix when
+    # the current process sees the repo via UNC (//wsl.localhost/.../home/...).
+    if normalized.startswith("/home/"):
+        for root in roots:
+            if "/home/" not in root:
+                continue
+            linux_root = "/home/" + root.split("/home/", 1)[1].rstrip("/")
+            if normalized == linux_root or normalized.startswith(linux_root + "/"):
+                return True
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in [settings.project_root.resolve(), settings.data.runs_dir.resolve()]:
         try:
             resolved.relative_to(root)
             return True
@@ -46,9 +68,16 @@ def _artifact_generated_at(path: Path) -> str:
     return str(payload.get("generated_at", ""))
 
 
+def _json_dict(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object at {path}")
+    return cast(dict[str, Any], raw)
+
+
 def _plain_json(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _json_dict(path)
     except (OSError, json.JSONDecodeError, TypeError):
         return None
 
@@ -139,24 +168,38 @@ def _latest_lifecycle_evidence(settings: Settings) -> dict[str, Any] | None:
         stabilization = _plain_json(stabilization_path)
         if stabilization:
             referenced_path = Path(str(stabilization.get("reconciliation_run", "")))
-            if referenced_path.exists() and _is_within_project(settings, referenced_path):
-                try:
-                    candidates.append({
-                        "origin": "windows_native_stabilization",
-                        "report_path": referenced_path,
-                        "generated_at": _artifact_generated_at(referenced_path),
-                        "payload": read_artifact_payload(referenced_path, expected_type="lifecycle_reconciliation"),
-                        "audit_ok": bool(stabilization.get("audit_ok", False)),
-                        "stabilization_run": str(stabilization_path),
-                        "audit_run": stabilization.get("audit_run", ""),
-                        "rerun_source": stabilization.get("rerun_source", ""),
-                    })
-                except (OSError, ValueError):
-                    pass
+            try:
+                if referenced_path.exists() and _is_within_project(settings, referenced_path):
+                    try:
+                        candidates.append({
+                            "origin": "windows_native_stabilization",
+                            "report_path": referenced_path,
+                            "generated_at": _artifact_generated_at(referenced_path),
+                            "payload": read_artifact_payload(referenced_path, expected_type="lifecycle_reconciliation"),
+                            "audit_ok": bool(stabilization.get("audit_ok", False)),
+                            "stabilization_run": str(stabilization_path),
+                            "audit_run": stabilization.get("audit_run", ""),
+                            "rerun_source": stabilization.get("rerun_source", ""),
+                        })
+                    except (OSError, ValueError):
+                        pass
+            except OSError:
+                pass
 
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (str(item.get("generated_at", "")), str(item.get("report_path", ""))))
+    priority = {
+        "canonical_evidence_store": 0,
+        "local_lifecycle_reconciliation": 1,
+        "windows_native_stabilization": 2,
+    }
+    candidates.sort(
+        key=lambda item: (
+            str(item.get("generated_at", "")),
+            priority.get(str(item.get("origin", "")), -1),
+            str(item.get("report_path", "")),
+        )
+    )
     return candidates[-1]
 
 
@@ -195,17 +238,6 @@ def _compute_endurance_gate_metrics(endurance_symbol: dict[str, Any]) -> dict[st
     Extracts and computes gate-relevant metrics from an endurance symbol payload.
     Handles missing fields gracefully (returns None for unavailable metrics).
     """
-    if not isinstance(endurance_symbol, dict):
-        return {
-            "trade_count": 0,
-            "no_trade_count": 0,
-            "blocked_trades": 0,
-            "no_trade_ratio": None,
-            "blocked_trades_ratio": None,
-            "avg_profit_factor": None,
-            "avg_expectancy_usd": None,
-            "cycles_completed": 0,
-        }
     cycle_metrics = endurance_symbol.get("cycle_metrics", []) or []
     trade_count = sum(int(item.get("trades", 0) or 0) for item in cycle_metrics)
     no_trade_count = int(endurance_symbol.get("no_trade_count", 0) or 0)

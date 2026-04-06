@@ -43,7 +43,7 @@ import platform
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.config import Settings
 
@@ -71,12 +71,18 @@ def _manifest_path(settings: Settings) -> Path:
     return evidence_store_dir(settings) / _MANIFEST_FILENAME
 
 
+def _coerce_json_dict(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("Expected JSON object")
+    return cast(dict[str, Any], raw)
+
+
 def _load_manifest(settings: Settings) -> dict[str, Any]:
     path = _manifest_path(settings)
     if not path.exists():
         return {"schema_version": _SCHEMA_VERSION, "entries": []}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = _coerce_json_dict(json.loads(path.read_text(encoding="utf-8")))
         if not isinstance(raw.get("entries"), list):
             return {"schema_version": _SCHEMA_VERSION, "entries": []}
         return raw
@@ -148,6 +154,11 @@ def ingest_evidence(
             "External Windows workspace paths (/mnt/c/...) are not accepted as canonical evidence."
         )
 
+    # Auto-expire stale entries before ingesting, if configured.
+    max_age = settings.operational.evidence_max_age_days
+    if max_age is not None:
+        expire_evidence(settings, max_age)
+
     store_dir = evidence_store_dir(settings)
     store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -216,7 +227,7 @@ def get_latest_evidence(
     if not entries:
         return None
     entries.sort(key=lambda e: e.get("created_at", ""))
-    return entries[-1]
+    return cast(dict[str, Any], entries[-1])
 
 
 def get_latest_evidence_payload(
@@ -240,13 +251,127 @@ def get_latest_evidence_payload(
     if current_checksum != entry.get("checksum", ""):
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = _coerce_json_dict(json.loads(path.read_text(encoding="utf-8")))
         # Unwrap artifact envelope if present
         if "payload" in raw and "artifact_type" in raw:
-            return raw["payload"]
+            return cast(dict[str, Any], raw["payload"])
         return raw
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def expire_evidence(
+    settings: Settings,
+    max_age_days: float,
+    reference_time: datetime | None = None,
+) -> list[str]:
+    """
+    Removes manifest entries (and their canonical files) older than ``max_age_days``.
+
+    Age is measured from ``created_at`` (original artifact timestamp).
+    Returns the list of entry_ids that were expired.
+    """
+    if max_age_days <= 0:
+        raise ValueError("max_age_days must be positive")
+
+    now = reference_time or datetime.now(tz=UTC)
+    manifest = _load_manifest(settings)
+    kept: list[dict[str, Any]] = []
+    expired_ids: list[str] = []
+
+    for entry in manifest["entries"]:
+        created_raw = entry.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(created_raw)
+            if ts.tzinfo is None:
+                from datetime import timezone
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_days = (now - ts).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            age_days = 0.0  # unparseable timestamp → keep entry
+
+        if age_days > max_age_days:
+            expired_ids.append(entry.get("entry_id", ""))
+            # Remove physical file if it still exists
+            abs_path = Path(entry.get("canonical_abs_path", ""))
+            if abs_path.exists():
+                try:
+                    abs_path.unlink()
+                except OSError:
+                    pass
+        else:
+            kept.append(entry)
+
+    if expired_ids:
+        manifest["entries"] = kept
+        _save_manifest(settings, manifest)
+
+    return expired_ids
+
+
+def detect_contradictions(settings: Settings) -> list[dict[str, Any]]:
+    """
+    Detects conflicting evidence entries for the same (artifact_type, symbol) key.
+
+    Two entries are contradictory when they share the same key but differ in checksum,
+    which can indicate that two independent runs produced incompatible artifacts.
+
+    Returns a list of contradiction records, each containing:
+      - key: the (artifact_type, symbol) identifier
+      - entry_ids: the conflicting entry IDs
+      - checksums: the distinct checksum values
+    """
+    manifest = _load_manifest(settings)
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for entry in manifest["entries"]:
+        key = f"{entry.get('artifact_type', '')}::{entry.get('symbol') or 'global'}"
+        by_key.setdefault(key, []).append(entry)
+
+    contradictions: list[dict[str, Any]] = []
+    for key, entries in sorted(by_key.items()):
+        distinct_checksums = {e.get("checksum", "") for e in entries}
+        if len(distinct_checksums) > 1:
+            contradictions.append({
+                "key": key,
+                "entry_ids": [e.get("entry_id") for e in entries],
+                "checksums": sorted(distinct_checksums),
+                "count": len(entries),
+            })
+    return contradictions
+
+
+def query_evidence_by_date_range(
+    settings: Settings,
+    artifact_type: str,
+    start: datetime,
+    end: datetime,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Returns manifest entries for ``artifact_type`` whose ``created_at`` falls
+    within [start, end] (inclusive).  Optionally filtered by symbol.
+
+    Results are ordered by ``created_at`` ascending.
+    """
+    manifest = _load_manifest(settings)
+    results: list[dict[str, Any]] = []
+    for entry in manifest["entries"]:
+        if entry.get("artifact_type") != artifact_type:
+            continue
+        if symbol is not None and entry.get("symbol") != symbol:
+            continue
+        created_raw = entry.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(created_raw)
+            if ts.tzinfo is None:
+                from datetime import timezone
+                ts = ts.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if start <= ts <= end:
+            results.append(entry)
+    results.sort(key=lambda e: e.get("created_at", ""))
+    return results
 
 
 def evidence_store_status(settings: Settings) -> dict[str, Any]:

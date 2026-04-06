@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -162,7 +161,7 @@ def run_lifecycle_reconciliation(
     client_factory: Callable[[], MT5Client] | None = None,
 ) -> tuple[int, Path]:
     run_dir = build_run_directory(settings.data.runs_dir, "lifecycle_reconciliation")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     state_path = build_runtime_state_path(settings)
     local_state, restore = restore_runtime_state(state_path, require_clean=False)
     if local_state is None:
@@ -202,10 +201,10 @@ def run_lifecycle_reconciliation(
 def lifecycle_audit_report(settings: Settings) -> tuple[int, Path]:
     candidates = sorted(settings.data.runs_dir.glob("*_lifecycle_reconciliation"))
     if not candidates:
-        raise FileNotFoundError("No hay lifecycle reconciliation runs disponibles")
+        raise FileNotFoundError("No lifecycle reconciliation runs available")
     source = candidates[-1]
     out_dir = build_run_directory(settings.data.runs_dir, "lifecycle_audit_report")
-    logger = configure_logging(out_dir, settings.logging.level)
+    logger = configure_logging(out_dir, settings.logging.level, settings.logging.format)
     payload = read_artifact_payload(source / "lifecycle_reconciliation_report.json", expected_type="lifecycle_reconciliation")
     write_json_report(out_dir, "lifecycle_reconciliation_report.json", wrap_artifact("lifecycle_reconciliation", payload))
     logger.info("lifecycle_audit_report source=%s run_dir=%s", source, out_dir)

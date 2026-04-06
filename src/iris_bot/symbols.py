@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +16,6 @@ from iris_bot.sessions import canonical_session_name
 class SymbolStrategyProfile:
     symbol: str
     enabled_state: str
-    enabled: bool
     allowed_timeframes: tuple[str, ...]
     allowed_sessions: tuple[str, ...]
     threshold: float
@@ -44,6 +42,12 @@ class SymbolStrategyProfile:
     rollback_target: str | None = None
 
     @property
+    def enabled(self) -> bool:
+        """Derived from enabled_state. A profile is operationally enabled when its
+        state is 'enabled' or 'caution'; all other states ('disabled', 'blocked') are off."""
+        return self.enabled_state in {"enabled", "caution"}
+
+    @property
     def exit_profile(self) -> SymbolExitProfile:
         return SymbolExitProfile(
             stop_policy=self.stop_policy,
@@ -65,7 +69,6 @@ def default_symbol_strategy_profile(settings: Settings, symbol: str) -> SymbolSt
     return SymbolStrategyProfile(
         symbol=symbol,
         enabled_state="enabled",
-        enabled=True,
         allowed_timeframes=(settings.trading.primary_timeframe,),
         allowed_sessions=("asia", "london", "new_york"),
         threshold=max(settings.risk.min_confidence, min(settings.threshold.grid)),
@@ -97,6 +100,7 @@ def _merge_profile(default_profile: SymbolStrategyProfile, payload: dict[str, An
     merged.update(payload)
     merged["allowed_timeframes"] = tuple(merged["allowed_timeframes"])
     merged["allowed_sessions"] = tuple(merged["allowed_sessions"])
+    merged.pop("enabled", None)  # derived property — not a constructor argument
     return SymbolStrategyProfile(**merged)
 
 

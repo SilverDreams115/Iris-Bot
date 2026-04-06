@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from iris_bot.config import Settings
+from iris_bot.demo_live_checklist import demo_live_checklist_command
+from iris_bot.demo_live_probe import run_demo_live_probe
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.mt5 import MT5Client, OrderRequest
 from iris_bot.paper import ExecutionDecision, OrderIntent, run_paper_session
@@ -9,7 +11,7 @@ from iris_bot.resilient import run_operational_status, run_reconcile_state, run_
 
 def mt5_check_command(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "mt5_check")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     client = MT5Client(settings.mt5)
     if not client.connect():
         logger.error("No se pudo inicializar la conexion MT5")
@@ -28,7 +30,7 @@ def run_demo_dry_command(settings: Settings) -> int:
     client = MT5Client(settings.mt5)
     if not client.connect():
         run_dir = build_run_directory(settings.data.runs_dir, "demo_dry")
-        logger = configure_logging(run_dir, settings.logging.level)
+        logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
         logger.error("No se pudo inicializar la conexion MT5 para demo dry-run")
         write_json_report(run_dir, "validation_report.json", {"ok": False, "connected": False, "terminal_initialized": False, "issues": ["connect_failed"]})
         return 1
@@ -70,6 +72,16 @@ def run_paper_resilient_command(settings: Settings) -> int:
 
 def run_demo_dry_resilient_command(settings: Settings) -> int:
     exit_code, _ = run_resilient_session(settings, mode="demo_dry", require_broker=True)
+    return exit_code
+
+
+def run_demo_live_probe_command(settings: Settings) -> int:
+    exit_code, _, _ = run_demo_live_probe(settings)
+    return exit_code
+
+
+def run_demo_live_checklist_command(settings: Settings) -> int:
+    exit_code, _, _ = demo_live_checklist_command(settings)
     return exit_code
 
 

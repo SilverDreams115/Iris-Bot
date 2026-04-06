@@ -18,14 +18,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from iris_bot.artifacts import wrap_artifact
 from iris_bot.config import load_settings
 from iris_bot.demo_readiness import generate_demo_execution_readiness_report
 from iris_bot.governance import (
     _materialize_active_profiles_from_registry,
-    load_strategy_profile_registry,
     registry_path,
     validate_strategy_profiles,
 )
@@ -69,14 +67,14 @@ def _write_validated_profile(settings, symbol: str) -> None:
 
 
 def _write_lifecycle(settings, symbol: str) -> None:
-    run_dir = settings.data.runs_dir / f"lc_lifecycle_reconciliation"
+    run_dir = settings.data.runs_dir / "lc_lifecycle_reconciliation"
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "ok": True, "critical_mismatch_count": 0, "mismatch_counts": {}, "mismatches": [],
         "symbols": {symbol: {"critical_mismatch_count": 0, "mismatch_categories": []}},
     }
     (run_dir / "lifecycle_reconciliation_report.json").write_text(json.dumps(wrap_artifact("lifecycle_reconciliation", payload)))
-    stab_dir = settings.data.runs_dir / f"lc_mt5_windows_stabilization"
+    stab_dir = settings.data.runs_dir / "lc_mt5_windows_stabilization"
     stab_dir.mkdir(parents=True, exist_ok=True)
     rerun = {
         "audit_ok": True, "critical_mismatch_count": 0, "reconciliation_ok": True,

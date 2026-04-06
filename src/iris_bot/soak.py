@@ -6,11 +6,11 @@ import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from iris_bot.config import SessionConfig, Settings
 from iris_bot.logging_utils import build_run_directory, configure_logging
-from iris_bot.mt5 import DryRunOrderResult, MT5Client
+from iris_bot.mt5 import BrokerSnapshot, DryRunOrderResult, MT5Client, OrderRequest
 from iris_bot.operational import write_json, write_rows_csv
 from iris_bot.resilient import (
     build_runtime_state_path,
@@ -95,11 +95,11 @@ class ChaosMT5Client(MT5Client):
             return self._base.last_error()
         return (1, "Success")
 
-    def broker_state_snapshot(self, symbols: tuple[str, ...]):  # type: ignore[override]
+    def broker_state_snapshot(self, symbols: tuple[str, ...]) -> BrokerSnapshot:
         if self._base is not None:
             snapshot = self._base.broker_state_snapshot(symbols)
         else:
-            snapshot = __import__("iris_bot.mt5", fromlist=["BrokerSnapshot"]).BrokerSnapshot(True, {"balance": 1000.0, "equity": 1000.0}, [], [], [])
+            snapshot = BrokerSnapshot(True, {"balance": 1000.0, "equity": 1000.0}, [], [], [])
         if self._active("broker_mismatch_once"):
             fake_position = {
                 "ticket": 999,
@@ -111,10 +111,10 @@ class ChaosMT5Client(MT5Client):
                 "tp": 1.3200,
                 "time": 1,
             }
-            snapshot.positions.append(fake_position)  # type: ignore[attr-defined]
+            snapshot.positions.append(fake_position)
         return snapshot
 
-    def dry_run_market_order(self, order):  # type: ignore[override]
+    def dry_run_market_order(self, order: OrderRequest) -> DryRunOrderResult:
         if self._active("repeated_rejections"):
             return DryRunOrderResult(False, "not enough money", None, None, [])
         if self._active("communication_error_once"):
@@ -125,7 +125,10 @@ class ChaosMT5Client(MT5Client):
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object at {path}")
+    return cast(dict[str, Any], raw)
 
 
 def _read_alerts(path: Path) -> list[dict[str, Any]]:
@@ -283,7 +286,7 @@ def run_soak(
 ) -> tuple[int, Path]:
     command_name = "paper_soak" if mode == "paper" else "demo_dry_soak"
     run_dir = build_run_directory(settings.data.runs_dir, command_name)
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     cycle_summaries_dir = run_dir / "cycle_summaries"
     cycle_summaries_dir.mkdir(parents=True, exist_ok=True)
     incidents: list[dict[str, Any]] = []
@@ -368,7 +371,7 @@ def run_chaos_scenario(settings: Settings, mode: str, require_broker: bool) -> t
 def regenerate_go_no_go_report(settings: Settings) -> tuple[int, Path]:
     candidates = sorted(list(settings.data.runs_dir.glob("*_paper_soak")) + list(settings.data.runs_dir.glob("*_demo_dry_soak")))
     if not candidates:
-        raise FileNotFoundError("No hay soak runs disponibles")
+        raise FileNotFoundError("No soak runs available")
     run_dir = candidates[-1]
     health = _read_json(run_dir / "health_report.json")
     cycles = [CycleHealth(**item) for item in health.get("cycles", [])]

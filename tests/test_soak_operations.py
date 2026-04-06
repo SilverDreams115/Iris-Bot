@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from iris_bot.config import ChaosConfig, MT5Config, OperationalConfig, RecoveryConfig, Settings, SoakConfig

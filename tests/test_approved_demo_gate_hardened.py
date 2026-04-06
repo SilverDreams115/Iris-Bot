@@ -21,14 +21,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from iris_bot.artifacts import wrap_artifact
 from iris_bot.config import load_settings
 from iris_bot.governance import (
     _promotion_review_for_symbol,
     load_strategy_profile_registry,
-    registry_path,
     validate_strategy_profiles,
 )
 
@@ -79,7 +77,6 @@ def _make_validated_registry(settings, symbol: str) -> dict:
 
 
 def _write_lifecycle(settings, run_id: str, symbol: str, critical: int = 0, audit_ok: bool = True) -> None:
-    from datetime import UTC, datetime
     run_dir = settings.data.runs_dir / f"{run_id}_lifecycle_reconciliation"
     run_dir.mkdir(parents=True, exist_ok=True)
     payload = {

@@ -24,9 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from iris_bot.artifacts import artifact_schema_report, wrap_artifact
+from iris_bot.artifacts import wrap_artifact
 from iris_bot.config import Settings
-from iris_bot.evidence_store import evidence_store_status, get_latest_evidence
+from iris_bot.evidence_store import evidence_store_status
 from iris_bot.governance import (
     _entry_checksum_ok,
     _find_entry,
@@ -35,13 +35,11 @@ from iris_bot.governance import (
     active_strategy_profiles_path,
     load_strategy_profile_registry,
     registry_path,
-    resolve_active_profiles,
 )
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.portfolio import build_portfolio_separation
+from iris_bot.profile_evidence import _is_within_project
 from iris_bot.registry_lock import governance_lock_audit
-from iris_bot.run_index import run_index_status
-from iris_bot.symbols import strategy_profiles_path
 
 
 def _check_registry_integrity(settings: Settings) -> dict[str, Any]:
@@ -106,8 +104,8 @@ def _check_lifecycle_evidence(settings: Settings) -> dict[str, Any]:
     audit_satisfied = not gate_cfg.require_lifecycle_audit_ok or audit_ok
 
     # Check it's from a project-internal path (not external Windows workspace)
-    report_path = lifecycle.get("report_path", "")
-    from_project = str(settings.project_root) in str(report_path)
+    report_path = Path(str(lifecycle.get("report_path", "")))
+    from_project = _is_within_project(settings, report_path)
 
     ok = clean and recent and audit_satisfied and from_project
 
@@ -365,7 +363,7 @@ def demo_execution_readiness(settings: Settings) -> int:
         2 if not_ready
     """
     run_dir = build_run_directory(settings.data.runs_dir, "demo_execution_readiness")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
     report = generate_demo_execution_readiness_report(settings)
     write_json_report(

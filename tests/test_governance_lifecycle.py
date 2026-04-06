@@ -18,7 +18,7 @@ from iris_bot.governance import (
 )
 from iris_bot.lifecycle import reconcile_lifecycle_records, run_lifecycle_reconciliation
 from iris_bot.operational import AccountState, PaperEngineState, atomic_write_json
-from iris_bot.paper import load_paper_context, run_paper_engine
+from iris_bot.paper import load_paper_context, run_paper_engine, PaperSessionConfig
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.symbol_endurance import _endurance_consistency, run_symbol_endurance
 from iris_bot.symbols import write_symbol_strategy_profiles
@@ -614,7 +614,7 @@ def test_load_paper_context_blocks_invalid_active_profile(tmp_path: Path, monkey
         load_paper_context(settings)
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
-        assert "Perfiles activos invalidos para operacion" in str(exc)
+        assert "Invalid active profiles for operation" in str(exc)
 
 
 def test_diagnose_profile_activation_writes_reports(tmp_path: Path, monkeypatch) -> None:
@@ -645,7 +645,6 @@ def test_run_paper_engine_traces_active_profile_metadata() -> None:
     profile = SymbolStrategyProfile(
         symbol="EURUSD",
         enabled_state="enabled",
-        enabled=True,
         allowed_timeframes=("M15",),
         allowed_sessions=("asia",),
         threshold=0.6,
@@ -669,19 +668,21 @@ def test_run_paper_engine_traces_active_profile_metadata() -> None:
         promotion_reason="ok",
     )
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.6,
-        backtest=settings.backtest,
-        risk=settings.risk,
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
-        symbol_exit_profiles={"EURUSD": SymbolExitProfile("static", "static", 1.5, 3.0, None, None, None, None)},
-        symbol_strategy_profiles={"EURUSD": profile},
-        threshold_by_symbol={"EURUSD": 0.6},
+        PaperSessionConfig(
+            mode="paper",
+            threshold=0.6,
+            trading_symbols=("EURUSD",),
+            one_position_per_symbol=True,
+            allow_long=True,
+            allow_short=True,
+            backtest=settings.backtest,
+            risk=settings.risk,
+            symbol_exit_profiles={"EURUSD": SymbolExitProfile("static", "static", 1.5, 3.0, None, None, None, None)},
+            symbol_strategy_profiles={"EURUSD": profile},
+            threshold_by_symbol={"EURUSD": 0.6},
+        ),
+        rows,
+        probabilities,
     )
     generated = [row for row in artifacts.signal_rows if row["status"] == "generated"][0]
     assert generated["active_profile_id"] == "EURUSD-approved"

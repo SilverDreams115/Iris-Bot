@@ -26,13 +26,27 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 
+from iris_bot.backtest_analysis import (
+    compute_signal_probabilities,
+    mark_to_market as _mark_to_market,
+    trade_metrics as _trade_metrics,
+)
+from iris_bot.backtest_pricing import (
+    build_instrument,
+    commission_usd as _commission_usd,
+    entry_execution_price as _entry_execution_price,
+    estimate_cost_breakdown as _estimate_cost_breakdown,
+    exit_execution_price as _exit_execution_price,
+    resolve_intrabar_exit as _resolve_intrabar_exit,
+)
 from iris_bot.config import BacktestConfig, DynamicExitConfig, ExitPolicyRuntimeConfig, RiskConfig, Settings
 from iris_bot.consistency import verify_engine_consistency
 from iris_bot.exits import SymbolExitProfile, build_exit_policies
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.processed_dataset import ProcessedDataset, ProcessedRow, load_processed_dataset
-from iris_bot.risk import ForexInstrument, calculate_position_size, realized_pnl_usd
+from iris_bot.risk import calculate_position_size, realized_pnl_usd
 from iris_bot.symbols import load_symbol_strategy_profiles, row_allowed_by_profile
 from iris_bot.thresholds import apply_probability_threshold
 from iris_bot.xgb_model import XGBoostMultiClassModel
@@ -120,241 +134,31 @@ class EquityPoint:
     open_positions: int
 
 
-# ---------------------------------------------------------------------------
-# Price helpers
-# ---------------------------------------------------------------------------
-
-def _half_spread_price(instrument: ForexInstrument, config: BacktestConfig) -> float:
-    return instrument.pip_size * config.spread_pips / 2.0
-
-
-def _slippage_price(instrument: ForexInstrument, config: BacktestConfig) -> float:
-    return instrument.pip_size * config.slippage_pips
+class TradeSummaryBucket(TypedDict):
+    symbol: str
+    timeframe: str
+    total_trades: int
+    net_pnl_usd: float
+    wins: int
+    losses: int
+    win_rate: float
 
 
-def _entry_execution_price(
-    raw_open: float,
-    direction: int,
-    instrument: ForexInstrument,
-    config: BacktestConfig,
-) -> float:
-    """Raw open ± (half-spread + slippage), adverse to the trader."""
-    adverse = _half_spread_price(instrument, config) + _slippage_price(instrument, config)
-    return raw_open + adverse if direction == 1 else raw_open - adverse
-
-
-def _exit_execution_price(
-    raw_price: float,
-    direction: int,
-    instrument: ForexInstrument,
-    config: BacktestConfig,
-) -> float:
-    """Raw exit price ± (half-spread + slippage), adverse to the trader."""
-    adverse = _half_spread_price(instrument, config) + _slippage_price(instrument, config)
-    return raw_price - adverse if direction == 1 else raw_price + adverse
-
-
-def _commission_usd(volume_lots: float, config: BacktestConfig) -> float:
-    return volume_lots * config.commission_per_lot_per_side_usd
-
-
-def _estimate_cost_breakdown(
-    instrument: ForexInstrument,
-    entry_raw_price: float,
-    exit_raw_price: float,
-    direction: int,
-    volume_lots: float,
-    config: BacktestConfig,
-    aux_rates: dict[str, float] | None = None,
-) -> tuple[float, float]:
-    """
-    Decompose total execution friction into spread cost and slippage cost.
-
-    Returns (spread_cost_usd, slippage_cost_usd).
-
-    spread_cost  = PnL_at_raw_prices  − PnL_at_spread_only_prices
-    slippage_cost = PnL_at_spread_only − PnL_at_full_execution_prices
-    """
-    spread_only_entry = (
-        entry_raw_price + _half_spread_price(instrument, config)
-        if direction == 1
-        else entry_raw_price - _half_spread_price(instrument, config)
-    )
-    spread_only_exit = (
-        exit_raw_price - _half_spread_price(instrument, config)
-        if direction == 1
-        else exit_raw_price + _half_spread_price(instrument, config)
-    )
-    full_entry = _entry_execution_price(entry_raw_price, direction, instrument, config)
-    full_exit = _exit_execution_price(exit_raw_price, direction, instrument, config)
-
-    gross_without_costs = realized_pnl_usd(instrument, entry_raw_price, exit_raw_price, direction, volume_lots, aux_rates)
-    pnl_with_spread = realized_pnl_usd(instrument, spread_only_entry, spread_only_exit, direction, volume_lots, aux_rates)
-    pnl_with_full = realized_pnl_usd(instrument, full_entry, full_exit, direction, volume_lots, aux_rates)
-
-    spread_cost = gross_without_costs - pnl_with_spread
-    slippage_cost = pnl_with_spread - pnl_with_full
-    return spread_cost, slippage_cost
-
-
-def build_instrument(symbol: str, config: BacktestConfig) -> ForexInstrument:
-    return ForexInstrument(
-        symbol=symbol,
-        contract_size=config.contract_size,
-        min_lot=config.min_lot,
-        lot_step=config.lot_step,
-        max_lot=config.max_lot,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Intrabar ambiguity resolution
-# ---------------------------------------------------------------------------
-
-def _resolve_intrabar_exit(
-    direction: int,
-    bar_low: float,
-    bar_high: float,
-    stop_loss_price: float,
-    take_profit_price: float,
-    policy: str,
-) -> tuple[float | None, str | None, bool]:
-    """
-    Determine if and how a position exits within a single bar.
-
-    Parameters
-    ----------
-    direction:         1 for long, -1 for short
-    bar_low:           Bar's low price
-    bar_high:          Bar's high price
-    stop_loss_price:   Stop loss level for the position
-    take_profit_price: Take profit level for the position
-    policy:            "conservative" (SL wins) or "optimistic" (TP wins)
-
-    Returns
-    -------
-    (raw_exit_price, exit_reason, is_intrabar_ambiguous)
-
-    - raw_exit_price:       None if no exit triggered this bar
-    - exit_reason:          None | "stop_loss" | "take_profit" |
-                            "stop_loss_same_bar" | "take_profit_same_bar"
-    - is_intrabar_ambiguous: True only when BOTH SL and TP were hit
-    """
-    if direction == 1:
-        sl_hit = bar_low <= stop_loss_price
-        tp_hit = bar_high >= take_profit_price
-    else:
-        sl_hit = bar_high >= stop_loss_price
-        tp_hit = bar_low <= take_profit_price
-
-    if sl_hit and tp_hit:
-        # Ambiguous: both barriers touched in the same bar
-        if policy == "optimistic":
-            return take_profit_price, "take_profit_same_bar", True
-        else:
-            # conservative (default) — stop loss wins
-            return stop_loss_price, "stop_loss_same_bar", True
-
-    if sl_hit:
-        return stop_loss_price, "stop_loss", False
-
-    if tp_hit:
-        return take_profit_price, "take_profit", False
-
-    return None, None, False
-
-
-# ---------------------------------------------------------------------------
-# Signal and mark-to-market helpers
-# ---------------------------------------------------------------------------
-
-def compute_signal_probabilities(
-    model: XGBoostMultiClassModel,
-    rows: list[ProcessedRow],
-    feature_names: list[str],
-) -> list[dict[int, float]]:
-    matrix = [[row.features[name] for name in feature_names] for row in rows]
-    return model.predict_probabilities(matrix)
-
-
-def _mark_to_market(
-    position: SimulatedPosition,
-    bar: ProcessedRow,
-    instrument: ForexInstrument,
-    config: BacktestConfig,
-    aux_rates: dict[str, float] | None = None,
-) -> float:
-    """Unrealised P&L for an open position at the current bar's close."""
-    exit_price = _exit_execution_price(bar.close, position.direction, instrument, config)
-    gross_pnl = realized_pnl_usd(instrument, position.entry_price, exit_price, position.direction, position.volume_lots, aux_rates)
-    commission_exit = _commission_usd(position.volume_lots, config)
-    return gross_pnl - position.commission_entry_usd - commission_exit
-
-
-# ---------------------------------------------------------------------------
-# Aggregate trade metrics
-# ---------------------------------------------------------------------------
-
-def _trade_metrics(
-    trades: list[TradeRecord],
-    starting_balance: float,
-    ending_balance: float,
-    equity_curve: list[EquityPoint],
-    total_steps: int,
-) -> dict[str, object]:
-    total_trades = len(trades)
-    wins = [t for t in trades if t.net_pnl_usd > 0.0]
-    losses = [t for t in trades if t.net_pnl_usd < 0.0]
-    gross_profit = sum(t.net_pnl_usd for t in wins)
-    gross_loss = -sum(t.net_pnl_usd for t in losses)
-    net_pnl = ending_balance - starting_balance
-    average_pnl = 0.0 if total_trades == 0 else net_pnl / total_trades
-    profit_factor = gross_profit / gross_loss if gross_loss > 0.0 else (999.0 if gross_profit > 0.0 else 0.0)
-    win_rate = 0.0 if total_trades == 0 else len(wins) / total_trades
-
-    peak = starting_balance
-    max_drawdown = 0.0
-    for point in equity_curve:
-        peak = max(peak, point.equity)
-        drawdown = peak - point.equity
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
-
-    exposure = (
-        0.0
-        if total_steps == 0
-        else sum(1 for pt in equity_curve if pt.open_positions > 0) / total_steps
-    )
-    return {
-        "starting_balance_usd": starting_balance,
-        "ending_balance_usd": ending_balance,
-        "total_trades": total_trades,
-        "win_rate": win_rate,
-        "gross_profit_usd": gross_profit,
-        "gross_loss_usd": gross_loss,
-        "net_pnl_usd": net_pnl,
-        "average_pnl_usd": average_pnl,
-        "expectancy_usd": average_pnl,
-        "max_drawdown_usd": max_drawdown,
-        "profit_factor": profit_factor,
-        "exposure": exposure,
-        "return_pct": 0.0 if starting_balance == 0.0 else net_pnl / starting_balance,
-    }
-
-
-def summarize_trades_by_symbol(trades: list[TradeRecord]) -> dict[str, dict[str, object]]:
-    summary: dict[str, dict[str, object]] = {}
+def summarize_trades_by_symbol(trades: list[TradeRecord]) -> dict[str, TradeSummaryBucket]:
+    summary: dict[str, TradeSummaryBucket] = {}
     for trade in trades:
+        default_bucket: TradeSummaryBucket = {
+            "symbol": trade.symbol,
+            "timeframe": trade.timeframe,
+            "total_trades": 0,
+            "net_pnl_usd": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+        }
         bucket = summary.setdefault(
             trade.symbol,
-            {
-                "symbol": trade.symbol,
-                "timeframe": trade.timeframe,
-                "total_trades": 0,
-                "net_pnl_usd": 0.0,
-                "wins": 0,
-                "losses": 0,
-            },
+            default_bucket,
         )
         bucket["total_trades"] += 1
         bucket["net_pnl_usd"] += trade.net_pnl_usd
@@ -547,7 +351,6 @@ def run_backtest_engine(
                     aux_rates,
                 )
                 commission_exit = _commission_usd(active.volume_lots, backtest)
-                # BUG FIX: use series[entry_index].open (not entry_index + 1)
                 entry_raw_price = series[active.entry_index].open
                 spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
                     instrument,
@@ -735,20 +538,20 @@ def _locate_experiment_reference(settings: Settings) -> ExperimentReference:
     else:
         candidates = sorted(settings.data.runs_dir.glob("*_experiment"))
         if not candidates:
-            raise FileNotFoundError("No hay runs de experimento disponibles")
+            raise FileNotFoundError("No experiment runs found")
         run_dir = candidates[-1]
 
     report_path = run_dir / "experiment_report.json"
     model_path = run_dir / "models" / "xgboost_model.json"
     if not report_path.exists():
-        raise FileNotFoundError(f"No existe experiment_report.json en {run_dir}")
+        raise FileNotFoundError(f"experiment_report.json not found in {run_dir}")
     if not model_path.exists():
-        raise FileNotFoundError(f"No existe xgboost_model.json en {run_dir}")
+        raise FileNotFoundError(f"xgboost_model.json not found in {run_dir}")
 
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     xgb_section = payload.get("xgboost")
     if not isinstance(xgb_section, dict):
-        raise FileNotFoundError("No existe metadata de XGBoost en el experiment_report")
+        raise FileNotFoundError("XGBoost metadata missing from experiment_report")
     threshold = xgb_section["threshold"]["threshold"]
     split_summary = payload["split_summary"]
     test_summary = next(item for item in split_summary if item["name"] == "test")
@@ -802,7 +605,7 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
     Exit code (0 = success).
     """
     run_dir = build_run_directory(settings.data.runs_dir, "backtest")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
     try:
         reference = _locate_experiment_reference(settings)
@@ -833,7 +636,7 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         )
     ]
     if len(rows) < 20:
-        logger.error("No hay suficientes filas procesadas para backtest: %s", len(rows))
+        logger.error("Insufficient processed rows for backtest: %s", len(rows))
         return 2
 
     model = XGBoostMultiClassModel(settings.xgboost)

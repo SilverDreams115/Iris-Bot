@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
-from dataclasses import asdict
 from math import sqrt
-from pathlib import Path
 from typing import Any
 
 from iris_bot.baselines import MomentumSignBaseline
@@ -12,12 +9,21 @@ from iris_bot.backtest import run_backtest_engine
 from iris_bot.config import Settings
 from iris_bot.data import Bar, group_bars, load_bars
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
-from iris_bot.processed_dataset import ProcessedDataset, ProcessedRow, load_processed_dataset
+from iris_bot.processed_dataset import ProcessedRow, load_processed_dataset
 from iris_bot.sessions import canonical_session_name, session_definition_report
 
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def _metric_float(metrics: dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = metrics.get(key, default)
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
 
 
 def _std(values: list[float]) -> float:
@@ -45,7 +51,6 @@ def _build_symbol_profile(
         for index in range(1, len(bars))
         if bars[index - 1].close != 0.0
     ]
-    candle_ranges = [bar.high - bar.low for bar in bars]
     atr_like = [
         (bar.high - bar.low) / bar.close
         for bar in bars
@@ -112,7 +117,7 @@ def _build_symbol_profile(
     if setup_frequency <= 0.05:
         aptitude = "low_setup_density"
         reasons.append("low_setup_density")
-    if baseline_metrics.get("expectancy_usd", 0.0) <= 0.0:
+    if _metric_float(baseline_metrics, "expectancy_usd") <= 0.0:
         reasons.append("baseline_expectancy_non_positive")
 
     return {
@@ -170,7 +175,7 @@ def _build_symbol_profile(
 def build_symbol_profiles_payload(settings: Settings) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     bars = load_bars(settings.data.raw_dataset_path)
     if not bars:
-        raise FileNotFoundError(f"No hay dataset crudo en {settings.data.raw_dataset_path}")
+        raise FileNotFoundError(f"Raw dataset not found at {settings.data.raw_dataset_path}")
     dataset = load_processed_dataset(
         settings.experiment.processed_dataset_path,
         settings.experiment.processed_schema_path,
@@ -210,7 +215,7 @@ def build_symbol_profiles_payload(settings: Settings) -> tuple[dict[str, Any], l
 
 def run_symbol_research(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "symbol_research")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     try:
         aggregate, symbol_reports = build_symbol_profiles_payload(settings)
     except FileNotFoundError as exc:

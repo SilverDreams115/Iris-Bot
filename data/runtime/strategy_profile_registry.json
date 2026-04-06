@@ -1,10 +1,10 @@
 {
   "artifact_type": "strategy_profile_registry",
-  "checksum": "e4b8fffa4de555737a6e68d2508e8a1e374249b857f916da91a7890093f10308",
+  "checksum": "1ee5ef3f5ade8f6fe5166939e9998db37117a9d0d7eedd4d8a0ccc524c9dc250",
   "compatibility": {
     "loader": "load_strategy_profile_registry"
   },
-  "generated_at": "2026-04-01T19:53:05.180669+00:00",
+  "generated_at": "2026-04-05T23:58:54.543504+00:00",
   "payload": {
     "active_profiles": {
       "AUDUSD": "AUDUSD-20260401T193139Z_strategy_validation-ec3bf4be07",
@@ -15,7 +15,7 @@
       "AUDUSD": [
         {
           "artifact_type": "strategy_profile",
-          "checksum": "0dcf0f60ee053b6f2b6802ff64571ef0f01a321f1fc1f2d578d40e32d0d83fe1",
+          "checksum": "f43cd4667488f5691a9637608e251addd7a9af2af46ee19004c12877223e3910",
           "created_at": "2026-04-01T18:40:32.233421+00:00",
           "enablement_state": "disabled",
           "model_variant": "global_model",
@@ -213,7 +213,7 @@
       "EURUSD": [
         {
           "artifact_type": "strategy_profile",
-          "checksum": "baceb9610ef2f1cb4ebb864a4a4591880d7bb0b9151fd5ac09fd75a749918de2",
+          "checksum": "2cf46317a5dc8ee7a08a4b1da8b0e3f6f45a84916c5901cc20ae3864f5908fcf",
           "created_at": "2026-04-01T18:40:32.233455+00:00",
           "enablement_state": "disabled",
           "model_variant": "global_model",
@@ -411,7 +411,7 @@
       "GBPUSD": [
         {
           "artifact_type": "strategy_profile",
-          "checksum": "7cc262a91262ffbb0c4c819eb3b6b25e8b573a5471d44033cd36218dd4e35d23",
+          "checksum": "2685e99e075f6ab7228f4043e99421106a5e116dafcd23ef600edfd7fc6002c6",
           "created_at": "2026-04-01T18:40:32.233480+00:00",
           "enablement_state": "disabled",
           "model_variant": "global_model",
@@ -609,7 +609,7 @@
       "USDJPY": [
         {
           "artifact_type": "strategy_profile",
-          "checksum": "eca50a58a0c0f8aaa0f557a83ac5d8c6546c74076b82bbae6f313bb600bf6199",
+          "checksum": "bd77f289607e6315b75afa9da69bf1b7bf283cf4ef7ed9c1fda523e85f4b5291",
           "created_at": "2026-04-01T18:40:32.233503+00:00",
           "enablement_state": "disabled",
           "model_variant": "global_model",

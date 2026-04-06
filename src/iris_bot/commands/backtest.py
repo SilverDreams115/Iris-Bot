@@ -19,7 +19,7 @@ def run_walkforward_backtest_command(settings: Settings, intrabar_policy_overrid
             backtest=dataclasses.replace(effective_settings.backtest, intrabar_policy=intrabar_policy_override),
         )
     run_dir = build_run_directory(effective_settings.data.runs_dir, "wf_backtest")
-    logger = configure_logging(run_dir, effective_settings.logging.level)
+    logger = configure_logging(run_dir, effective_settings.logging.level, effective_settings.logging.format)
     try:
         dataset = load_processed_dataset(
             effective_settings.experiment.processed_dataset_path,

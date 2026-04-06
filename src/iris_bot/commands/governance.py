@@ -11,6 +11,7 @@ from iris_bot.governance import (
     evidence_store_status_command,
     list_strategy_profiles,
     materialize_active_profiles,
+    repair_strategy_profile_registry,
     promote_strategy_profile,
     review_approved_demo_readiness,
     rollback_strategy_profile,
@@ -66,6 +67,11 @@ def audit_governance_locking_command(settings: Settings) -> int:
 def materialize_active_profiles_command(settings: Settings) -> int:
     """Materializes active_strategy_profiles.json from approved_demo entries only."""
     return materialize_active_profiles(settings)
+
+
+def repair_strategy_profile_registry_command(settings: Settings) -> int:
+    """Recomputes stale registry checksums and refreshes active materialization."""
+    return repair_strategy_profile_registry(settings)
 
 
 def evidence_store_status_cmd(settings: Settings) -> int:

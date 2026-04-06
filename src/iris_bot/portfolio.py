@@ -21,7 +21,7 @@ Key invariant:
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -122,7 +122,7 @@ def build_portfolio_separation(
         for entry in registry.get("profiles", {}).get(symbol, []):
             if entry.get("profile_id") == active_id:
                 pp = entry.get("profile_payload", {})
-                if pp.get("enabled_state") in ("enabled", "caution") and pp.get("enabled", True):
+                if pp.get("enabled_state") in ("enabled", "caution"):
                     active_portfolio.append(symbol)
                 break
 

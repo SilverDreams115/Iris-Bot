@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from iris_bot.config import (
@@ -20,7 +20,6 @@ from iris_bot.operational import (
     AccountState,
     AlertRecord,
     BrokerSyncStatus,
-    ClosedPaperTrade,
     DailyLossTracker,
     PaperEngineState,
     PaperPosition,
@@ -29,7 +28,6 @@ from iris_bot.operational import (
 )
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.resilient import (
-    BrokerPositionSnapshot,
     BrokerStateSnapshot,
     build_runtime_state_path,
     classify_broker_event,
@@ -159,6 +157,26 @@ def test_reconnect_success_and_failure() -> None:
     failure = reconnect_mt5(FakeClient([False, False]), RecoveryConfig(reconnect_retries=2, reconnect_backoff_seconds=0.0, require_state_restore_clean=True))
     assert success.ok is True
     assert failure.ok is False
+
+
+def test_reconnect_multiple_failures_then_success() -> None:
+    """Succeeds on the 3rd attempt (retries=3); report should record all attempt details."""
+    config = RecoveryConfig(reconnect_retries=3, reconnect_backoff_seconds=0.0, require_state_restore_clean=True)
+    report = reconnect_mt5(FakeClient([False, False, True]), config)
+    assert report.ok is True
+    assert len(report.attempts) == 3
+    assert report.attempts[0]["ok"] is False
+    assert report.attempts[1]["ok"] is False
+    assert report.attempts[2]["ok"] is True
+
+
+def test_reconnect_exhausted_retries_with_intermittent_pattern() -> None:
+    """All attempts fail even when pattern varies; blocked status is returned."""
+    config = RecoveryConfig(reconnect_retries=4, reconnect_backoff_seconds=0.0, require_state_restore_clean=True)
+    report = reconnect_mt5(FakeClient([False, False, False, False]), config)
+    assert report.ok is False
+    assert report.final_state == "blocked"
+    assert len(report.attempts) == 4
 
 
 def test_state_restore_success_and_corruption_block(tmp_path: Path) -> None:

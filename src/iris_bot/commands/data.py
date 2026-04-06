@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from iris_bot.config import Settings
 from iris_bot.datasets import write_dataset_bundle
 from iris_bot.data import load_bars
@@ -11,7 +13,7 @@ from iris_bot.validation import validate_bars
 
 def fetch_market_data(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "fetch")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     client = MT5Client(settings.mt5)
     if not client.connect():
         logger.error("No se pudo conectar a MetaTrader 5. Revisa IRIS_MT5_* y la instalacion del terminal.")
@@ -42,7 +44,7 @@ def fetch_market_data(settings: Settings) -> int:
 
 def validate_market_data(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "validate")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     bars = load_bars(settings.data.raw_dataset_path)
     if not bars:
         logger.error("No hay dataset en %s", settings.data.raw_dataset_path)
@@ -56,7 +58,7 @@ def validate_market_data(settings: Settings) -> int:
 
 def build_dataset_command(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "build_dataset")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     bars = load_bars(settings.data.raw_dataset_path)
     if not bars:
         logger.error("No hay dataset crudo en %s", settings.data.raw_dataset_path)
@@ -84,7 +86,7 @@ def build_dataset_command(settings: Settings) -> int:
 
 def inspect_dataset_command(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "inspect_dataset")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     try:
         dataset = load_processed_dataset(
             settings.experiment.processed_dataset_path,
@@ -101,7 +103,7 @@ def inspect_dataset_command(settings: Settings) -> int:
         settings.experiment.processed_dataset_path,
         len(dataset.rows),
         len(dataset.feature_names),
-        ",".join(dataset.manifest["symbols"]),
-        ",".join(dataset.manifest["timeframes"]),
+        ",".join(cast(list[str], dataset.manifest["symbols"])),
+        ",".join(cast(list[str], dataset.manifest["timeframes"])),
     )
     return 0

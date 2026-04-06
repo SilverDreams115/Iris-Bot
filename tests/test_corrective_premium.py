@@ -196,7 +196,6 @@ def test_processed_event_ids_used_for_real_event_id_mode() -> None:
 
 
 def test_processed_event_ids_fallback_is_explicit() -> None:
-    state = type("Obj", (), {"processing_state": type("P", (), {"last_processed_timestamp_by_symbol": {}, "processed_event_ids": [], "idempotency_mode_counts": {}})()})()
     event_id, mode = build_processing_event_id("EURUSD", "2026-01-01T00:00:00", None)
     assert mode == "timestamp_fallback"
     assert event_id.startswith("fallback:")
@@ -211,7 +210,6 @@ def test_session_taxonomy_is_consistent() -> None:
 
 
 def test_backtest_optimized_path_preserves_results() -> None:
-    start = datetime(2026, 1, 1, 0, 0, 0)
     processed = build_processed_dataset(_bars("EURUSD", 80), load_settings().labeling)
     rows = processed.rows[:30]
     probabilities = [{1: 0.85, 0: 0.10, -1: 0.05} for _ in rows]

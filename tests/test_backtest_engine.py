@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from iris_bot.backtest import compute_signal_probabilities, run_backtest_engine
+from iris_bot.backtest import run_backtest_engine
 from iris_bot.config import BacktestConfig, RiskConfig
 from iris_bot.processed_dataset import ProcessedRow
 

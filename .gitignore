@@ -12,3 +12,4 @@ data/processed/*.json
 runs/
 *.egg-info/
 .codex
+.env

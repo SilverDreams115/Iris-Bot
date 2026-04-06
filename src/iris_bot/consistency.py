@@ -28,10 +28,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 if TYPE_CHECKING:
-    from iris_bot.backtest import EquityPoint, TradeRecord
+    from iris_bot.backtest import EquityPoint
+
+
+class ConsistencyTrade(Protocol):
+    @property
+    def symbol(self) -> str: ...
+
+    @property
+    def signal_timestamp(self) -> str: ...
+
+    @property
+    def entry_timestamp(self) -> str: ...
+
+    @property
+    def exit_timestamp(self) -> str: ...
+
+    @property
+    def direction(self) -> int: ...
+
+    @property
+    def volume_lots(self) -> float: ...
+
+    @property
+    def bars_held(self) -> int: ...
+
+    @property
+    def total_commission_usd(self) -> float: ...
+
+    @property
+    def exit_reason(self) -> str: ...
+
+    @property
+    def gross_pnl_usd(self) -> float: ...
+
+    @property
+    def net_pnl_usd(self) -> float: ...
 
 
 @dataclass
@@ -87,8 +122,8 @@ _VALID_EXIT_REASONS: frozenset[str] = frozenset({
 
 
 def verify_engine_consistency(
-    trades: list[TradeRecord],
-    equity_curve: list[EquityPoint],
+    trades: Sequence[ConsistencyTrade],
+    equity_curve: Sequence[EquityPoint],
     starting_balance: float,
     tolerance: float = 0.01,
 ) -> ConsistencyReport:

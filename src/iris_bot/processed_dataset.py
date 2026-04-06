@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite, log, sqrt
 from pathlib import Path
+from typing import cast
 
 from iris_bot.config import LabelingConfig
 from iris_bot.data import Bar, group_bars
@@ -199,7 +200,13 @@ def build_processed_dataset(bars: list[Bar], labeling: LabelingConfig) -> Proces
             "1": sum(1 for row in rows if row.label == 1),
         },
     }
-    return ProcessedDataset(rows=rows, feature_names=FEATURE_NAMES_BASE.copy(), label_mode=labeling.mode, schema=schema, manifest=manifest)
+    return ProcessedDataset(
+        rows=rows,
+        feature_names=FEATURE_NAMES_BASE.copy(),
+        label_mode=labeling.mode,
+        schema=cast(dict[str, object], schema),
+        manifest=manifest,
+    )
 
 
 def write_processed_dataset(dataset: ProcessedDataset, dataset_path: Path, manifest_path: Path, schema_path: Path) -> None:
@@ -244,7 +251,7 @@ def write_processed_dataset(dataset: ProcessedDataset, dataset_path: Path, manif
 
 def load_processed_dataset(dataset_path: Path, schema_path: Path, manifest_path: Path) -> ProcessedDataset:
     if not dataset_path.exists():
-        raise FileNotFoundError(f"No existe el dataset procesado: {dataset_path}")
+        raise FileNotFoundError(f"Processed dataset not found: {dataset_path}")
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     feature_names = list(schema["feature_columns"])

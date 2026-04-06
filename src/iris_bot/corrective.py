@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.artifacts import artifact_schema_report, read_artifact_payload, wrap_artifact
 from iris_bot.config import Settings
@@ -16,6 +16,13 @@ from iris_bot.symbols import strategy_profiles_path
 def _latest_run(settings: Settings, suffix: str) -> Path | None:
     candidates = sorted(settings.data.runs_dir.glob(f"*_{suffix}"))
     return candidates[-1] if candidates else None
+
+
+def _json_dict(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object at {path}")
+    return cast(dict[str, Any], raw)
 
 
 def _leakage_fix_report(settings: Settings) -> dict[str, Any]:
@@ -36,14 +43,14 @@ def _reconciliation_scope_report(settings: Settings) -> dict[str, Any]:
             "reconcile_symbols_only": settings.mt5.reconcile_symbols_only,
             "note": "No resilient run found; reporting configured reconciliation scope.",
         }
-    return json.loads((latest / "reconciliation_scope_report.json").read_text(encoding="utf-8"))
+    return _json_dict(latest / "reconciliation_scope_report.json")
 
 
 def _idempotency_report(settings: Settings) -> dict[str, Any]:
     latest = _latest_run(settings, "demo_dry_resilient") or _latest_run(settings, "paper_resilient")
     if latest is None or not (latest / "idempotency_report.json").exists():
         return {"ok": True, "uses_real_event_ids": False, "fallback_active": True, "note": "No resilient run found; fallback path remains the current guaranteed mode."}
-    return json.loads((latest / "idempotency_report.json").read_text(encoding="utf-8"))
+    return _json_dict(latest / "idempotency_report.json")
 
 
 def _session_consistency_report(settings: Settings) -> dict[str, Any]:
@@ -126,7 +133,7 @@ def _artifact_schema_summary(settings: Settings) -> dict[str, Any]:
 
 def run_corrective_audit(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "corrective_audit")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     leakage_fix = _leakage_fix_report(settings)
     reconciliation_scope = _reconciliation_scope_report(settings)
     idempotency = _idempotency_report(settings)

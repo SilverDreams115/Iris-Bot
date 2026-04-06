@@ -21,12 +21,16 @@ Usage pattern (all registry mutations must follow this):
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import os
 import time
 from pathlib import Path
 from typing import Generator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 class RegistryMutationConflictError(Exception):
@@ -35,6 +39,29 @@ class RegistryMutationConflictError(Exception):
 
 class RegistryLockTimeoutError(Exception):
     """Raised when the exclusive lock cannot be acquired within the configured timeout."""
+
+
+def _try_lock_nonblocking(handle: object) -> bool:
+    if os.name == "nt":
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _unlock(handle: object) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def registry_etag(path: Path) -> str:
@@ -83,7 +110,9 @@ def registry_exclusive_lock(
         deadline = time.monotonic() + timeout_seconds
         while True:
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = _try_lock_nonblocking(fh)
+                if not locked:
+                    raise BlockingIOError
                 break
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
@@ -105,7 +134,7 @@ def registry_exclusive_lock(
             current_etag = registry_etag(registry_path)
             if current_etag != expected_etag:
                 # Release before raising so other waiters can proceed
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                _unlock(fh)
                 raise RegistryMutationConflictError(
                     f"Registry {registry_path.name} was mutated by a concurrent process "
                     f"between pre-computation and lock acquisition. "
@@ -120,7 +149,7 @@ def registry_exclusive_lock(
             fh.truncate()
             fh.write(f"released_at={time.time():.6f}\n")
             fh.flush()
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            _unlock(fh)
     finally:
         fh.close()
 
@@ -144,6 +173,22 @@ def governance_lock_audit(registry_path: Path) -> dict:
     if lock_exists:
         try:
             lock_content = lock_path.read_text(encoding="utf-8").strip()
+            if os.name == "nt" and lock_content.startswith("released_at=") and "pid=" not in lock_content:
+                lock_held = False
+                lock_pid = None
+                lock_stale = False
+                return {
+                    "registry_path": str(registry_path),
+                    "lock_path": str(lock_path),
+                    "lock_file_exists": lock_exists,
+                    "lock_currently_held": lock_held,
+                    "lock_pid": lock_pid,
+                    "lock_stale": lock_stale,
+                    "lock_content": lock_content,
+                    "registry_exists": registry_path.exists(),
+                    "registry_etag": registry_etag(registry_path) if registry_path.exists() else "",
+                    "safe_to_mutate": registry_path.exists() and not lock_held,
+                }
             # Parse PID from lock file content
             for line in lock_content.splitlines():
                 if line.startswith("pid="):
@@ -153,19 +198,19 @@ def governance_lock_audit(registry_path: Path) -> dict:
                         pass
             fh = lock_path.open("r", encoding="utf-8")
             try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                lock_held = False
-            except BlockingIOError:
-                lock_held = True
-                # Check if the holding process is still alive
-                if lock_pid is not None:
-                    try:
-                        os.kill(lock_pid, 0)
-                    except ProcessLookupError:
-                        lock_stale = True
-                    except PermissionError:
-                        pass  # Process exists but we can't signal it
+                if _try_lock_nonblocking(fh):
+                    _unlock(fh)
+                    lock_held = False
+                else:
+                    lock_held = True
+                    # Check if the holding process is still alive
+                    if lock_pid is not None:
+                        try:
+                            os.kill(lock_pid, 0)
+                        except ProcessLookupError:
+                            lock_stale = True
+                        except PermissionError:
+                            pass  # Process exists but we can't signal it
             finally:
                 fh.close()
         except OSError:

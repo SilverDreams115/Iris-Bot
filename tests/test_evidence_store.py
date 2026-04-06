@@ -19,16 +19,20 @@ import pytest
 
 from iris_bot.artifacts import wrap_artifact
 from iris_bot.config import load_settings
+from datetime import UTC, datetime, timedelta
+
 from iris_bot.evidence_store import (
     ExternalPathError,
     UnknownArtifactTypeError,
+    detect_contradictions,
     evidence_store_status,
+    expire_evidence,
     get_latest_evidence,
     get_latest_evidence_payload,
     ingest_evidence,
+    query_evidence_by_date_range,
 )
 from iris_bot.run_index import (
-    get_all_runs,
     get_latest_run,
     register_run,
     run_index_status,
@@ -313,6 +317,131 @@ def test_run_index_status(tmp_path, monkeypatch):
     assert status["total_entries"] == 2
     assert "lifecycle_reconciliation" in status["by_run_type"]
     assert "symbol_endurance" in status["by_run_type"]
+
+
+# --- Retention policy ---
+
+def test_expire_evidence_removes_old_entries(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "old_run")
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "old_run", "EURUSD")
+    # Expire with a reference time 100 days in the future
+    future = datetime.now(tz=UTC) + timedelta(days=100)
+    expired = expire_evidence(settings, max_age_days=1, reference_time=future)
+    assert len(expired) == 1
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 0
+
+
+def test_expire_evidence_keeps_recent_entries(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "new_run")
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "new_run", "EURUSD")
+    # Expire with max_age_days=365 and reference_time=now → entry is less than 1 second old
+    expired = expire_evidence(settings, max_age_days=365)
+    assert expired == []
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 1
+
+
+def test_expire_evidence_deletes_physical_file(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "run_x")
+    entry = ingest_evidence(settings, source, "lifecycle_reconciliation", "run_x", "EURUSD")
+    canonical = Path(entry["canonical_abs_path"])
+    assert canonical.exists()
+    future = datetime.now(tz=UTC) + timedelta(days=400)
+    expire_evidence(settings, max_age_days=1, reference_time=future)
+    assert not canonical.exists()
+
+
+def test_expire_evidence_zero_max_age_raises(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    with pytest.raises(ValueError):
+        expire_evidence(settings, max_age_days=0)
+
+
+def test_expire_evidence_selective_keeps_newer(tmp_path, monkeypatch):
+    """Only the old entry is expired; the new entry is retained."""
+    settings = _settings(tmp_path, monkeypatch)
+    old_src = _write_lifecycle_artifact(tmp_path, "EURUSD", "run_old")
+    new_src = _write_lifecycle_artifact(tmp_path, "GBPUSD", "run_new")
+    ingest_evidence(settings, old_src, "lifecycle_reconciliation", "run_old", "EURUSD")
+    ingest_evidence(settings, new_src, "lifecycle_reconciliation", "run_new", "GBPUSD")
+    # Both are very recent, but set reference_time to 400 days ahead
+    # max_age_days=365 → anything older than 365 days expires → both expire
+    # Instead use 0.0001 days (about 8 seconds) — entries are seconds old → they expire
+    future_ref = datetime.now(tz=UTC) + timedelta(days=400)
+    expire_evidence(settings, max_age_days=365, reference_time=future_ref)
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 0  # both ~0 days old relative to creation, 400 days old relative to future_ref
+
+
+# --- Contradiction detection ---
+
+def test_detect_contradictions_finds_differing_checksums(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    src1 = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1", critical=0)
+    src2 = _write_lifecycle_artifact(tmp_path, "EURUSD", "run2", critical=1)  # different payload → different checksum
+    ingest_evidence(settings, src1, "lifecycle_reconciliation", "run1", "EURUSD")
+    ingest_evidence(settings, src2, "lifecycle_reconciliation", "run2", "EURUSD")
+    contradictions = detect_contradictions(settings)
+    # Two entries for the same key (lifecycle_reconciliation::EURUSD) with different checksums
+    assert len(contradictions) == 1
+    assert contradictions[0]["key"] == "lifecycle_reconciliation::EURUSD"
+    assert len(contradictions[0]["checksums"]) == 2
+
+
+def test_detect_contradictions_no_conflict_same_checksum(tmp_path, monkeypatch):
+    """Same artifact ingested twice (idempotent) → no contradictions."""
+    settings = _settings(tmp_path, monkeypatch)
+    src = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1")
+    ingest_evidence(settings, src, "lifecycle_reconciliation", "run1", "EURUSD")
+    ingest_evidence(settings, src, "lifecycle_reconciliation", "run1", "EURUSD")  # idempotent
+    contradictions = detect_contradictions(settings)
+    assert contradictions == []
+
+
+def test_detect_contradictions_empty_store_returns_empty(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    assert detect_contradictions(settings) == []
+
+
+# --- Date-range query ---
+
+def test_query_evidence_by_date_range_returns_matching(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    src = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1")
+    ingest_evidence(settings, src, "lifecycle_reconciliation", "run1", "EURUSD")
+    start = datetime.now(tz=UTC) - timedelta(hours=1)
+    end = datetime.now(tz=UTC) + timedelta(hours=1)
+    results = query_evidence_by_date_range(settings, "lifecycle_reconciliation", start, end)
+    assert len(results) == 1
+    assert results[0]["source_run_id"] == "run1"
+
+
+def test_query_evidence_by_date_range_excludes_outside_window(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    src = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1")
+    ingest_evidence(settings, src, "lifecycle_reconciliation", "run1", "EURUSD")
+    # Query window is 10 days in the future
+    start = datetime.now(tz=UTC) + timedelta(days=10)
+    end = datetime.now(tz=UTC) + timedelta(days=20)
+    results = query_evidence_by_date_range(settings, "lifecycle_reconciliation", start, end)
+    assert results == []
+
+
+def test_query_evidence_by_date_range_filters_by_symbol(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    src1 = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1")
+    src2 = _write_lifecycle_artifact(tmp_path, "GBPUSD", "run2")
+    ingest_evidence(settings, src1, "lifecycle_reconciliation", "run1", "EURUSD")
+    ingest_evidence(settings, src2, "lifecycle_reconciliation", "run2", "GBPUSD")
+    start = datetime.now(tz=UTC) - timedelta(hours=1)
+    end = datetime.now(tz=UTC) + timedelta(hours=1)
+    results = query_evidence_by_date_range(settings, "lifecycle_reconciliation", start, end, symbol="EURUSD")
+    assert len(results) == 1
+    assert results[0]["symbol"] == "EURUSD"
 
 
 def test_run_index_replaces_glob_for_canonical_discovery(tmp_path, monkeypatch):

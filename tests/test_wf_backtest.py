@@ -15,9 +15,7 @@ import pytest
 
 pytest.importorskip("xgboost")
 
-from iris_bot.config import BacktestConfig, RiskConfig, WalkForwardConfig, XGBoostConfig
 from iris_bot.config import load_settings
-from iris_bot.logging_utils import configure_logging, build_run_directory
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.wf_backtest import run_walkforward_economic_backtest
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Generic, Protocol, TypeVar
 
 
 @dataclass(frozen=True)
@@ -12,28 +13,36 @@ class SplitSummary:
     end_timestamp: str | None
 
 
+class TimestampedRow(Protocol):
+    @property
+    def timestamp(self) -> datetime: ...
+
+
+RowT = TypeVar("RowT", bound=TimestampedRow)
+
+
 @dataclass(frozen=True)
-class TemporalSplit:
-    train: list[object]
-    validation: list[object]
-    test: list[object]
+class TemporalSplit(Generic[RowT]):
+    train: list[RowT]
+    validation: list[RowT]
+    test: list[RowT]
     summaries: list[SplitSummary]
 
 
-def _extract_timestamp(item: object) -> datetime:
-    return getattr(item, "timestamp")
+def _extract_timestamp(item: TimestampedRow) -> datetime:
+    return item.timestamp
 
 
 def temporal_train_validation_test_split(
-    rows: list[object],
+    rows: list[RowT],
     train_ratio: float,
     validation_ratio: float,
     test_ratio: float,
-) -> TemporalSplit:
+) -> TemporalSplit[RowT]:
     if abs((train_ratio + validation_ratio + test_ratio) - 1.0) > 1e-9:
-        raise ValueError("Las proporciones de split deben sumar 1.0")
+        raise ValueError("Split ratios must sum to 1.0")
     if len(rows) < 5:
-        raise ValueError("No hay suficientes filas para split temporal")
+        raise ValueError("Insufficient rows for temporal split")
 
     ordered = sorted(rows, key=_extract_timestamp)
     total = len(ordered)

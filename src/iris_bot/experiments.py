@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from dataclasses import asdict
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from iris_bot.logging_utils import build_run_directory, configure_logging, write
 from iris_bot.metrics import classification_metrics
 from iris_bot.preprocessing import validate_feature_rows
 from iris_bot.processed_dataset import ProcessedDataset, ProcessedRow, load_processed_dataset
+from iris_bot.significance import run_walkforward_permutation_significance
 from iris_bot.splits import temporal_train_validation_test_split
 from iris_bot.thresholds import (
     apply_probability_threshold,
@@ -55,9 +55,30 @@ def _write_predictions_csv(path: Path, rows: list[ProcessedRow], predictions: li
             )
 
 
+def _write_significance_trials_csv(path: Path, payload: dict[str, object]) -> None:
+    trial_results = payload.get("trial_results", [])
+    if not isinstance(trial_results, list):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["trial_index", "metric_value", "valid_folds", "skipped_folds"])
+        for item in trial_results:
+            if not isinstance(item, dict):
+                continue
+            writer.writerow(
+                [
+                    item.get("trial_index"),
+                    item.get("metric_value"),
+                    item.get("valid_folds"),
+                    item.get("skipped_folds"),
+                ]
+            )
+
+
 def run_experiment(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "experiment")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     dataset = load_processed_dataset(
         settings.experiment.processed_dataset_path,
         settings.experiment.processed_schema_path,
@@ -86,6 +107,7 @@ def run_experiment(settings: Settings) -> int:
         labels=validation_labels,
         grid=settings.threshold.grid,
         metric_name=settings.threshold.objective_metric,
+        refinement_steps=settings.threshold.refinement_steps,
     )
     baseline_test_scores = baseline.score([row.features for row in split.test])
     baseline_predictions = apply_score_threshold(baseline_test_scores, baseline_threshold.threshold)
@@ -104,6 +126,7 @@ def run_experiment(settings: Settings) -> int:
         labels=validation_labels,
         grid=settings.threshold.grid,
         metric_name=settings.threshold.objective_metric,
+        refinement_steps=settings.threshold.refinement_steps,
     )
     test_probabilities = xgb_model.predict_probabilities(test_matrix)
     xgb_predictions = apply_probability_threshold(test_probabilities, threshold_result.threshold)
@@ -136,6 +159,7 @@ def run_experiment(settings: Settings) -> int:
                 wf_validation_labels,
                 settings.threshold.grid,
                 settings.threshold.objective_metric,
+                refinement_steps=settings.threshold.refinement_steps,
             )
             fold_test_scores = fold_baseline.score([row.features for row in test_rows])
             fold_baseline_predictions = apply_score_threshold(fold_test_scores, fold_baseline_threshold.threshold)
@@ -148,6 +172,7 @@ def run_experiment(settings: Settings) -> int:
                 wf_validation_labels,
                 settings.threshold.grid,
                 settings.threshold.objective_metric,
+                refinement_steps=settings.threshold.refinement_steps,
             )
             fold_test_probabilities = fold_model.predict_probabilities(wf_test_matrix)
             fold_xgb_predictions = apply_probability_threshold(fold_test_probabilities, fold_threshold.threshold)
@@ -161,10 +186,30 @@ def run_experiment(settings: Settings) -> int:
                 }
             )
 
+    significance_payload: dict[str, object] = {"enabled": False, "status": "disabled"}
+    if settings.significance.enabled:
+        if settings.walk_forward.enabled:
+            significance_payload = run_walkforward_permutation_significance(
+                rows=rows,
+                feature_names=feature_names,
+                settings=settings,
+                logger=logger,
+            )
+        else:
+            significance_payload = {
+                "enabled": True,
+                "status": "skipped",
+                "reason": "significance requires walk_forward.enabled=True",
+                "evaluation_mode": "walk_forward",
+                "metric_name": settings.significance.metric_name,
+            }
+
     if settings.experiment.save_predictions_csv:
         _write_predictions_csv(run_dir / "baseline_test_predictions.csv", split.test, baseline_predictions, baseline_test_scores)
         xgb_scores = [max(row.get(1, 0.0), row.get(-1, 0.0)) for row in test_probabilities]
         _write_predictions_csv(run_dir / "xgboost_test_predictions.csv", split.test, xgb_predictions, xgb_scores)
+    if settings.significance.enabled:
+        _write_significance_trials_csv(run_dir / "significance_trials.csv", significance_payload)
 
     write_json_report(
         run_dir,
@@ -184,9 +229,16 @@ def run_experiment(settings: Settings) -> int:
                 "metrics": xgb_metrics,
                 "best_iteration": xgb_model.best_iteration,
                 "best_score": xgb_model.best_score,
+                "class_weighting": {
+                    "enabled": settings.xgboost.use_class_weights,
+                    "max_multiplier": settings.xgboost.class_weight_max_multiplier,
+                    "weights": {str(label): weight for label, weight in xgb_model.class_weights.items()},
+                },
+                "probability_calibration": xgb_model.probability_calibration_metadata(),
                 "feature_importance": xgb_model.feature_importance(),
             },
             "walk_forward": walk_forward_payload,
+            "significance": significance_payload,
         },
     )
     write_json_report(
@@ -198,6 +250,7 @@ def run_experiment(settings: Settings) -> int:
             "walk_forward": asdict(settings.walk_forward),
             "threshold": asdict(settings.threshold),
             "xgboost": asdict(settings.xgboost),
+            "significance": asdict(settings.significance),
         },
     )
     logger.info("experiment rows=%s feature_count=%s run_dir=%s", len(rows), len(feature_names), run_dir)

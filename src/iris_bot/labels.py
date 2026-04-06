@@ -68,4 +68,4 @@ def build_label(series: list[Bar], index: int, config: LabelingConfig) -> LabelO
         return next_bar_direction_label(series, index, config)
     if config.mode == "triple_barrier":
         return triple_barrier_label(series, index, config)
-    raise ValueError(f"Modo de labeling no soportado: {config.mode}")
+    raise ValueError(f"Unsupported labeling mode: {config.mode}")

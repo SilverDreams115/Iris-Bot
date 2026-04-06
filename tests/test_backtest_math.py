@@ -1,4 +1,3 @@
-from iris_bot.config import BacktestConfig
 from iris_bot.risk import ForexInstrument, calculate_position_size, realized_pnl_usd
 
 

@@ -1,0 +1,17 @@
+# Resolved external dependencies for the current project environment.
+# Install the project itself separately with: `pip install -e .`
+iniconfig==2.3.0
+mypy==1.17.1
+mypy_extensions==1.1.0
+MetaTrader5>=5.0 ; platform_system == "Windows"
+numpy==2.4.4
+nvidia-nccl-cu12==2.29.7
+packaging==26.0
+pathspec==1.0.4
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.0.2
+ruff==0.12.12
+scipy==1.17.1
+typing_extensions==4.15.0
+xgboost==3.2.0

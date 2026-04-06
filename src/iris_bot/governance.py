@@ -1,46 +1,35 @@
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import asdict
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-from iris_bot.artifacts import artifact_schema_report, read_artifact_payload, wrap_artifact
+from iris_bot.artifacts import artifact_schema_report, wrap_artifact
 from iris_bot.config import Settings
-from iris_bot.evidence_store import (
-    MANAGED_ARTIFACT_TYPES,
-    ExternalPathError,
-    evidence_store_status,
-    ingest_evidence,
+from iris_bot.evidence_store import evidence_store_status
+from iris_bot.governance_active import (
+    resolve_active_profile_entry,
+    resolve_active_profiles,
 )
+from iris_bot.governance_promotion import (
+    promote_strategy_profile as _promote_strategy_profile,
+    rollback_strategy_profile as _rollback_strategy_profile,
+)
+from iris_bot.governance_validation import validate_strategy_profiles
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.profile_evidence import (
-    _artifact_generated_at,
     _compute_endurance_gate_metrics,
-    _is_within_project,
     _latest_endurance_evidence,
     _latest_endurance_payload,
     _latest_lifecycle_evidence,
     _latest_lifecycle_payload,
     _lifecycle_evidence_age_hours,
-    _plain_json,
 )
 from iris_bot.profile_registry import (
-    _build_rollback_snapshot,
-    _canonical_profile_payload,
     _entry_checksum_ok,
     _find_entry,
     _latest_entry_by_state,
-    _latest_run,
     _materialize_active_profiles_from_registry,
-    _merge_symbol_profile,
     _profile_checksum,
-    _read_strategy_profiles_payload,
-    _registry_default,
-    _sync_strategy_profiles_file,
-    _upsert_entry,
     _validated_profile_for_symbol,
     active_strategy_profiles_path,
     load_strategy_profile_registry,
@@ -54,196 +43,25 @@ from iris_bot.registry_lock import (
     registry_etag,
     registry_exclusive_lock,
 )
-from iris_bot.run_index import get_latest_run, register_run
-from iris_bot.symbols import SymbolStrategyProfile, load_symbol_strategy_profiles, strategy_profiles_path
+from iris_bot.symbols import load_symbol_strategy_profiles, strategy_profiles_path
 
-
-def resolve_active_profile_entry(
-    settings: Settings,
-    symbol: str,
-    registry: dict[str, Any] | None = None,
-    file_profiles: dict[str, SymbolStrategyProfile] | None = None,
-) -> dict[str, Any]:
-    registry_payload = registry or load_strategy_profile_registry(settings)
-    strategy_profiles = file_profiles or load_symbol_strategy_profiles(settings)
-    active_id = registry_payload.get("active_profiles", {}).get(symbol, "")
-    entry = _find_entry(registry_payload, symbol, active_id) if active_id else None
-    valid_states = {"approved_demo"} | ({"validated"} if settings.governance.allow_validated_fallback else set())
-    reasons: list[str] = []
-    warnings: list[str] = []
-    if not active_id:
-        reasons.append("no_active_profile_registered")
-    elif entry is None:
-        reasons.append("active_profile_missing_in_registry")
-    else:
-        if entry.get("promotion_state") not in valid_states:
-            reasons.append(f"active_profile_state_invalid:{entry.get('promotion_state', '')}")
-        if not _entry_checksum_ok(entry):
-            reasons.append("registry_profile_checksum_mismatch")
-        path_report = artifact_schema_report(strategy_profiles_path(settings), expected_type="strategy_profiles")
-        if not path_report.get("ok", False):
-            reasons.append("strategy_profiles_schema_incompatible")
-        file_profile = strategy_profiles.get(symbol)
-        if file_profile is not None and file_profile.profile_id and file_profile.profile_id != active_id:
-            warnings.append("strategy_profiles_out_of_sync_with_registry")
-    resolved_profile = None
-    if entry is not None and not reasons:
-        resolved_profile = _merge_symbol_profile(settings, symbol, dict(entry["profile_payload"]))
-    file_profile = strategy_profiles.get(symbol)
-    enablement_state = entry.get("enablement_state", file_profile.enabled_state if file_profile else "missing") if entry is not None else (file_profile.enabled_state if file_profile else "missing")
-    model_variant = entry.get("model_variant", file_profile.model_variant if file_profile else "") if entry is not None else (file_profile.model_variant if file_profile else "")
-    source_run_id = entry.get("source_run_id", file_profile.source_run_id if file_profile else "") if entry is not None else (file_profile.source_run_id if file_profile else "")
-    return {
-        "symbol": symbol,
-        "ok": resolved_profile is not None,
-        "operationally_valid": resolved_profile is not None,
-        "active_profile_id": active_id,
-        "profile_found": entry is not None,
-        "promotion_state": entry.get("promotion_state", "") if entry else "",
-        "enablement_state": enablement_state,
-        "model_variant": model_variant,
-        "source_run_id": source_run_id,
-        "reasons": reasons,
-        "warnings": warnings,
-        "resolved_profile": resolved_profile,
-    }
-
-
-def resolve_active_profiles(settings: Settings) -> tuple[dict[str, SymbolStrategyProfile], dict[str, Any]]:
-    registry = load_strategy_profile_registry(settings)
-    file_profiles = load_symbol_strategy_profiles(settings)
-    resolved: dict[str, SymbolStrategyProfile] = {}
-    report_symbols: dict[str, Any] = {}
-    blocked = 0
-    for symbol in settings.trading.symbols:
-        status = resolve_active_profile_entry(settings, symbol, registry=registry, file_profiles=file_profiles)
-        report_symbols[symbol] = {key: value for key, value in status.items() if key != "resolved_profile"}
-        if status["ok"] and status["resolved_profile"] is not None:
-            resolved[symbol] = status["resolved_profile"]
-        elif settings.governance.require_active_profile:
-            blocked += 1
-    return resolved, {"symbols": report_symbols, "blocked_symbols": blocked, "require_active_profile": settings.governance.require_active_profile}
-
-
-def _strategy_validation_inputs(settings: Settings) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
-    latest = _latest_run(settings, "strategy_validation")
-    if latest is None:
-        raise FileNotFoundError("No hay strategy_validation previa")
-    enablement = read_artifact_payload(latest / "symbol_enablement_report.json", expected_type="symbol_enablement")
-    leakage = read_artifact_payload(latest / "leakage_fix_report.json", expected_type="strategy_validation")
-    comparison = read_artifact_payload(latest / "strategy_validation_report.json", expected_type="strategy_validation")
-    return latest, enablement, leakage, comparison
-
-
-def validate_strategy_profiles(settings: Settings) -> int:
-    run_dir = build_run_directory(settings.data.runs_dir, "strategy_profile_validation")
-    logger = configure_logging(run_dir, settings.logging.level)
-    try:
-        latest_validation, enablement, leakage, comparison = _strategy_validation_inputs(settings)
-        profiles = load_symbol_strategy_profiles(settings)
-    except (FileNotFoundError, ValueError) as exc:
-        logger.error(str(exc))
-        return 1
-
-    strategy_schema = artifact_schema_report(strategy_profiles_path(settings), expected_type="strategy_profiles")
-
-    # Capture etag BEFORE any computation so we can detect concurrent mutations
-    reg_path = registry_path(settings)
-    pre_lock_etag = registry_etag(reg_path)
-
-    # Build the new entries outside the lock (read-only, fast)
-    # We'll use a temporary registry snapshot for rollback_target lookups
-    registry_snapshot = load_strategy_profile_registry(settings)
-    new_entries: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-    payload: dict[str, Any] = {
-        "symbols": {},
-        "source_run_id": latest_validation.name,
-        "leakage_safe": leakage.get("test_used_for_selection") is False,
-    }
-
-    for symbol, profile in sorted(profiles.items()):
-        decision = enablement.get("symbols", {}).get(symbol, {})
-        chosen_model = comparison.get("symbols", {}).get(symbol, {}).get("chosen_model", profile.model_variant)
-        promotion_state = "blocked"
-        reason = "blocked_by_default"
-        enablement_state = "disabled"
-        enabled = False
-        if not strategy_schema.get("ok", False):
-            promotion_state = "blocked"
-            reason = "strategy_profiles_schema_incompatible"
-        elif leakage.get("test_used_for_selection") is not False:
-            promotion_state = "blocked"
-            reason = "validation_leakage_detected"
-        elif decision.get("state") == "enabled":
-            promotion_state = "validated"
-            reason = "strategy_validation_passed"
-            enablement_state = "enabled"
-            enabled = True
-        elif decision.get("state") == "caution":
-            promotion_state = "caution"
-            reason = "strategy_validation_caution"
-            enablement_state = "caution"
-            enabled = True
-        profile_payload = {
-            **asdict(profile),
-            "enabled_state": enablement_state,
-            "enabled": enabled,
-            "model_variant": chosen_model,
-            "source_run_id": latest_validation.name,
-            "promotion_state": promotion_state,
-            "promotion_reason": reason,
-            "rollback_target": registry_snapshot.get("active_profiles", {}).get(symbol),
-        }
-        checksum = _profile_checksum(profile_payload)
-        profile_id = f"{symbol}-{latest_validation.name}-{checksum[:10]}"
-        profile_payload["profile_id"] = profile_id
-        entry = {
-            "profile_id": profile_id,
-            "artifact_type": "strategy_profile",
-            "schema_version": strategy_schema.get("schema_version", 1),
-            "checksum": checksum,
-            "created_at": datetime.now(tz=UTC).isoformat(),
-            "source_run_id": latest_validation.name,
-            "symbol": symbol,
-            "model_variant": chosen_model,
-            "enablement_state": enablement_state,
-            "promotion_state": promotion_state,
-            "promotion_reason": reason,
-            "rollback_target": registry_snapshot.get("active_profiles", {}).get(symbol),
-            "profile_payload": profile_payload,
-        }
-        new_entries.append((symbol, entry, {
-            "profile_id": profile_id,
-            "from_state": "candidate",
-            "to_state": promotion_state,
-            "promotion_reason": reason,
-        }))
-
-    # Write mutations under exclusive lock to prevent lost updates
-    try:
-        with registry_exclusive_lock(reg_path, expected_etag=pre_lock_etag):
-            # Re-read authoritative state inside lock
-            registry = load_strategy_profile_registry(settings)
-            for symbol, entry, summary in new_entries:
-                # Refresh rollback_target with authoritative active_profiles
-                rollback_target = registry.get("active_profiles", {}).get(symbol)
-                entry["rollback_target"] = rollback_target
-                entry["profile_payload"]["rollback_target"] = rollback_target
-                _upsert_entry(registry, symbol, entry)
-                payload["symbols"][symbol] = summary
-            save_strategy_profile_registry(settings, registry)
-            _sync_strategy_profiles_file(settings, registry)
-            _materialize_active_profiles_from_registry(settings, registry)
-    except RegistryMutationConflictError as exc:
-        logger.error("Concurrent mutation conflict in validate_strategy_profiles: %s", exc)
-        return 5
-    except RegistryLockTimeoutError as exc:
-        logger.error("Timeout adquiriendo lock del registry en validate_strategy_profiles: %s", exc)
-        return 6
-
-    write_json_report(run_dir, "strategy_profile_validation_report.json", wrap_artifact("strategy_profile_validation", payload))
-    logger.info("strategy_profile_validation symbols=%s run_dir=%s", len(payload["symbols"]), run_dir)
-    return 0
+__all__ = [
+    # Governance pipeline functions defined here
+    "run_promotion_review",
+    "run_governance_audit",
+    "run_governance_rollback",
+    "resolve_active_profiles",
+    "resolve_active_profile_entry",
+    # Re-exported registry helpers used by tests and callers
+    "active_strategy_profiles_path",
+    "load_strategy_profile_registry",
+    "registry_path",
+    "save_strategy_profile_registry",
+    "validate_strategy_profiles",
+    "repair_strategy_profile_registry",
+    # Re-exported internal helpers for test access
+    "_find_entry",
+]
 
 
 def _promotion_review_for_symbol(
@@ -547,11 +365,11 @@ def _promotion_review_symbols(settings: Settings, registry: dict[str, Any]) -> t
 
 def review_approved_demo_readiness(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "review_approved_demo_readiness")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     registry = load_strategy_profile_registry(settings)
     symbols = _promotion_review_symbols(settings, registry)
     if not symbols:
-        logger.error("No hay simbolos validated elegibles para revisar")
+        logger.error("No validated symbols eligible for promotion review")
         return 2
     reviews = {symbol: _promotion_review_for_symbol(settings, symbol, registry, strict=False) for symbol in symbols}
     summary = {
@@ -581,209 +399,16 @@ def review_approved_demo_readiness(settings: Settings) -> int:
 
 
 def promote_strategy_profile(settings: Settings) -> int:
-    run_dir = build_run_directory(settings.data.runs_dir, "strategy_profile_promotion")
-    logger = configure_logging(run_dir, settings.logging.level)
-    symbol = settings.governance.target_symbol or settings.endurance.target_symbol
-    if not symbol:
-        logger.error("IRIS_GOVERNANCE_TARGET_SYMBOL es requerido")
-        return 1
-
-    # --- Pre-lock phase: read-only review (may be slightly stale, used for decision + reporting) ---
-    reg_path = registry_path(settings)
-    pre_lock_etag = registry_etag(reg_path)
-    registry_snapshot = load_strategy_profile_registry(settings)
-    review = _promotion_review_for_symbol(
-        settings,
-        symbol,
-        registry_snapshot,
-        target_profile_id=settings.governance.target_profile_id,
-    )
-    profile_snapshot = _validated_profile_for_symbol(registry_snapshot, symbol, settings.governance.target_profile_id)
-    if profile_snapshot is None:
-        logger.error("No existe perfil validado para %s", symbol)
-        return 2
-
-    final_state = review["final_decision"]
-    report_profile_id = profile_snapshot["profile_id"]
-    report_active_id = ""
-    report_final_state = "validated"
-
-    # --- Mutations require exclusive lock ---
-    try:
-        with registry_exclusive_lock(reg_path, expected_etag=pre_lock_etag):
-            # Re-read authoritative state inside lock
-            registry = load_strategy_profile_registry(settings)
-            profile = _validated_profile_for_symbol(registry, symbol, settings.governance.target_profile_id)
-            if profile is None:
-                logger.error("Perfil validado no encontrado en registry dentro del lock: %s", symbol)
-                return 3
-            previous_active = registry.get("active_profiles", {}).get(symbol)
-
-            if final_state == "APPROVED_DEMO":
-                if previous_active is None or previous_active == profile["profile_id"]:
-                    rollback_snapshot = _build_rollback_snapshot(profile)
-                    _upsert_entry(registry, symbol, rollback_snapshot)
-                    previous_active = rollback_snapshot["profile_id"]
-                if previous_active and previous_active != profile["profile_id"]:
-                    previous_entry = _find_entry(registry, symbol, previous_active)
-                    if previous_entry is not None:
-                        previous_entry["promotion_state"] = "deprecated"
-                        previous_entry["promotion_reason"] = "replaced_by_new_approved_profile"
-                profile["promotion_state"] = settings.governance.promotion_target_state
-                profile["promotion_reason"] = "endurance_and_lifecycle_passed"
-                profile["rollback_target"] = previous_active
-                profile["profile_payload"]["promotion_state"] = settings.governance.promotion_target_state
-                profile["profile_payload"]["promotion_reason"] = "endurance_and_lifecycle_passed"
-                profile["profile_payload"]["rollback_target"] = previous_active
-                profile["checksum"] = _profile_checksum(profile["profile_payload"])
-                registry.setdefault("active_profiles", {})[symbol] = profile["profile_id"]
-            elif final_state == "MOVE_TO_CAUTION":
-                profile["promotion_state"] = "caution"
-                profile["promotion_reason"] = ",".join(review["reasons"]) or "promotion_requires_caution"
-                profile["profile_payload"]["promotion_state"] = "caution"
-                profile["profile_payload"]["promotion_reason"] = profile["promotion_reason"]
-                profile["checksum"] = _profile_checksum(profile["profile_payload"])
-                _upsert_entry(registry, symbol, profile)
-            elif final_state == "REVERT_TO_BLOCKED":
-                profile["promotion_state"] = "blocked"
-                profile["promotion_reason"] = ",".join(review["reasons"]) or "promotion_blocked"
-                profile["profile_payload"]["promotion_state"] = "blocked"
-                profile["profile_payload"]["promotion_reason"] = profile["promotion_reason"]
-                profile["checksum"] = _profile_checksum(profile["profile_payload"])
-                registry.get("active_profiles", {}).pop(symbol, None)
-                _upsert_entry(registry, symbol, profile)
-
-            save_strategy_profile_registry(settings, registry)
-            _sync_strategy_profiles_file(settings, registry)
-            _materialize_active_profiles_from_registry(settings, registry)
-
-            # Capture post-mutation values for reporting (inside lock, authoritative)
-            report_profile_id = profile["profile_id"]
-            report_active_id = registry.get("active_profiles", {}).get(symbol, "")
-            report_final_state = profile["promotion_state"] if final_state != "KEEP_VALIDATED" else "validated"
-
-    except RegistryMutationConflictError as exc:
-        logger.error("Concurrent mutation conflict in promote_strategy_profile for %s: %s", symbol, exc)
-        return 5
-    except RegistryLockTimeoutError as exc:
-        logger.error("Timeout adquiriendo lock del registry para promote %s: %s", symbol, exc)
-        return 6
-
-    report = {
-        "symbol": symbol,
-        "profile_id": report_profile_id,
-        "requested_state": settings.governance.promotion_target_state,
-        "final_state": report_final_state,
-        "review_decision": final_state,
-        "promotion_reason": ",".join(review["reasons"]) if final_state in ("KEEP_VALIDATED",) else review.get("reasons", []),
-        "rollback_target": profile_snapshot.get("rollback_target"),
-        "active_profile_id": report_active_id,
-        "gate_matrix": review["gate_matrix"],
-        "gate_config_snapshot": review.get("gate_config_snapshot", {}),
-        "endurance_summary": review["endurance_summary"],
-        "lifecycle_summary": review["lifecycle_summary"],
-        "locking": {"lock_used": True, "etag_checked": True},
-    }
-    write_json_report(run_dir, "strategy_profile_promotion_report.json", wrap_artifact("strategy_profile_promotion", report))
-    write_json_report(run_dir, "promotion_gate_matrix.json", wrap_artifact("strategy_profile_promotion", {"symbols": {symbol: review["gate_matrix"]}}))
-    write_json_report(run_dir, "promotion_decision_summary.json", wrap_artifact("strategy_profile_promotion", {"symbols": {symbol: final_state}}))
-    write_json_report(
-        run_dir,
-        "active_profile_resolution_report.json",
-        wrap_artifact("active_strategy_status", resolve_active_profiles(settings)[1]),
-    )
-    write_json_report(run_dir, "active_strategy_status.json", wrap_artifact("active_strategy_status", resolve_active_profiles(settings)[1]))
-    logger.info("strategy_profile_promotion symbol=%s state=%s decision=%s run_dir=%s", symbol, report_final_state, final_state, run_dir)
-    return 0 if final_state == "APPROVED_DEMO" else 2
+    return _promote_strategy_profile(settings, _promotion_review_for_symbol)
 
 
 def rollback_strategy_profile(settings: Settings) -> int:
-    run_dir = build_run_directory(settings.data.runs_dir, "strategy_profile_rollback")
-    logger = configure_logging(run_dir, settings.logging.level)
-    symbol = settings.governance.target_symbol or settings.endurance.target_symbol
-    if not symbol:
-        logger.error("IRIS_GOVERNANCE_TARGET_SYMBOL es requerido")
-        return 1
-
-    reg_path = registry_path(settings)
-    pre_lock_etag = registry_etag(reg_path)
-
-    # Pre-flight: check preconditions before acquiring lock
-    registry_snapshot = load_strategy_profile_registry(settings)
-    current_id = registry_snapshot.get("active_profiles", {}).get(symbol)
-    if not current_id:
-        logger.error("No hay perfil activo para %s", symbol)
-        return 2
-
-    report_deprecated_id = ""
-    report_restored_id = ""
-
-    try:
-        with registry_exclusive_lock(reg_path, expected_etag=pre_lock_etag):
-            # Re-read authoritative state inside lock
-            registry = load_strategy_profile_registry(settings)
-            current_id = registry.get("active_profiles", {}).get(symbol)
-            if not current_id:
-                logger.error("No hay perfil activo para %s (dentro del lock)", symbol)
-                return 2
-            current_entry = _find_entry(registry, symbol, current_id)
-            if current_entry is None:
-                logger.error("No existe entrada activa para %s", symbol)
-                return 3
-            rollback_target = current_entry.get("rollback_target")
-            if not rollback_target:
-                previous = _latest_entry_by_state(registry, symbol, {"approved_demo", "validated", "deprecated"})
-                rollback_target = (
-                    previous.get("profile_id")
-                    if previous is not None and previous.get("profile_id") != current_id
-                    else None
-                )
-            target_entry = _find_entry(registry, symbol, rollback_target) if rollback_target else None
-            if target_entry is None:
-                logger.error("No existe rollback_target valido para %s", symbol)
-                return 4
-
-            current_entry["promotion_state"] = "deprecated"
-            current_entry["promotion_reason"] = "manual_rollback"
-            current_entry["profile_payload"]["promotion_state"] = "deprecated"
-            current_entry["profile_payload"]["promotion_reason"] = "manual_rollback"
-            current_entry["checksum"] = _profile_checksum(current_entry["profile_payload"])
-
-            target_entry["promotion_state"] = "approved_demo"
-            target_entry["promotion_reason"] = "rollback_target_restored"
-            target_entry["profile_payload"]["promotion_state"] = "approved_demo"
-            target_entry["profile_payload"]["promotion_reason"] = "rollback_target_restored"
-            target_entry["checksum"] = _profile_checksum(target_entry["profile_payload"])
-
-            registry.setdefault("active_profiles", {})[symbol] = target_entry["profile_id"]
-            save_strategy_profile_registry(settings, registry)
-            _sync_strategy_profiles_file(settings, registry)
-            _materialize_active_profiles_from_registry(settings, registry)
-
-            report_deprecated_id = current_id
-            report_restored_id = target_entry["profile_id"]
-
-    except RegistryMutationConflictError as exc:
-        logger.error("Concurrent mutation conflict in rollback for %s: %s", symbol, exc)
-        return 5
-    except RegistryLockTimeoutError as exc:
-        logger.error("Timeout adquiriendo lock del registry para rollback %s: %s", symbol, exc)
-        return 6
-
-    report = {
-        "symbol": symbol,
-        "deprecated_profile_id": report_deprecated_id,
-        "restored_profile_id": report_restored_id,
-        "locking": {"lock_used": True, "etag_checked": True},
-    }
-    write_json_report(run_dir, "strategy_profile_promotion_report.json", wrap_artifact("strategy_profile_promotion", report))
-    logger.info("strategy_profile_rollback symbol=%s restored=%s", symbol, report_restored_id)
-    return 0
+    return _rollback_strategy_profile(settings)
 
 
 def list_strategy_profiles(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "list_strategy_profiles")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     payload = load_strategy_profile_registry(settings)
     write_json_report(run_dir, "strategy_profile_registry.json", wrap_artifact("strategy_profile_registry", payload))
     logger.info("list_strategy_profiles run_dir=%s", run_dir)
@@ -792,7 +417,7 @@ def list_strategy_profiles(settings: Settings) -> int:
 
 def active_strategy_status(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "active_strategy_status")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     _, payload = resolve_active_profiles(settings)
     write_json_report(run_dir, "active_strategy_status.json", wrap_artifact("active_strategy_status", payload))
     logger.info("active_strategy_status blocked=%s run_dir=%s", payload["blocked_symbols"], run_dir)
@@ -801,7 +426,7 @@ def active_strategy_status(settings: Settings) -> int:
 
 def diagnose_profile_activation(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "diagnose_profile_activation")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     registry = load_strategy_profile_registry(settings)
     file_profiles = load_symbol_strategy_profiles(settings)
     _, active_payload = resolve_active_profiles(settings)
@@ -906,7 +531,7 @@ def audit_governance_locking(settings: Settings) -> int:
     Returns 0 if everything is clean, 2 if there are warnings.
     """
     run_dir = build_run_directory(settings.data.runs_dir, "governance_lock_audit")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
     reg_path = registry_path(settings)
     lock_audit = governance_lock_audit(reg_path)
@@ -949,7 +574,7 @@ def materialize_active_profiles(settings: Settings) -> int:
     is up to date.
     """
     run_dir = build_run_directory(settings.data.runs_dir, "materialize_active_profiles")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
     reg_path = registry_path(settings)
     pre_lock_etag = registry_etag(reg_path)
@@ -984,6 +609,58 @@ def materialize_active_profiles(settings: Settings) -> int:
     return 0
 
 
+def repair_strategy_profile_registry(settings: Settings) -> int:
+    """
+    Recomputes stale profile checksums in the registry and refreshes active materialization.
+
+    This is a maintenance command for historical registries created before the
+    current canonical checksum rules. It does not change business state
+    (promotion/enablement), only integrity metadata and the derived
+    active_strategy_profiles materialization.
+    """
+    run_dir = build_run_directory(settings.data.runs_dir, "repair_strategy_profile_registry")
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
+
+    reg_path = registry_path(settings)
+    pre_lock_etag = registry_etag(reg_path)
+    repaired_entries: list[dict[str, str]] = []
+
+    try:
+        with registry_exclusive_lock(reg_path, expected_etag=pre_lock_etag):
+            registry = load_strategy_profile_registry(settings)
+            for symbol, entries in registry.get("profiles", {}).items():
+                for entry in entries:
+                    if _entry_checksum_ok(entry):
+                        continue
+                    payload = dict(entry.get("profile_payload", {}))
+                    old_checksum = str(entry.get("checksum", ""))
+                    new_checksum = _profile_checksum(payload)
+                    entry["checksum"] = new_checksum
+                    repaired_entries.append(
+                        {
+                            "symbol": str(symbol),
+                            "profile_id": str(entry.get("profile_id", "")),
+                            "old_checksum": old_checksum,
+                            "new_checksum": new_checksum,
+                        }
+                    )
+            save_strategy_profile_registry(settings, registry)
+            _materialize_active_profiles_from_registry(settings, registry)
+    except (RegistryMutationConflictError, RegistryLockTimeoutError) as exc:
+        logger.error("No se pudo reparar strategy profile registry bajo lock: %s", exc)
+        return 5
+
+    report = {
+        "registry_path": str(reg_path),
+        "repaired_entry_count": len(repaired_entries),
+        "repaired_entries": repaired_entries,
+        "active_strategy_profiles_path": str(active_strategy_profiles_path(settings)),
+    }
+    write_json_report(run_dir, "strategy_profile_registry_repair_report.json", wrap_artifact("strategy_profile_registry", report))
+    logger.info("repair_strategy_profile_registry repaired=%s run_dir=%s", len(repaired_entries), run_dir)
+    return 0
+
+
 def evidence_store_status_command(settings: Settings) -> int:
     """
     Reports the status of the canonical evidence store.
@@ -995,7 +672,7 @@ def evidence_store_status_command(settings: Settings) -> int:
       - Whether any integrity failures exist
     """
     run_dir = build_run_directory(settings.data.runs_dir, "evidence_store_status")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     status = evidence_store_status(settings)
     write_json_report(run_dir, "evidence_store_manifest.json", wrap_artifact("evidence_store_manifest", status))
     logger.info(
@@ -1018,7 +695,7 @@ def approved_demo_gate_audit(settings: Settings) -> int:
     promoted to approved_demo.
     """
     run_dir = build_run_directory(settings.data.runs_dir, "approved_demo_gate_audit")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     registry = load_strategy_profile_registry(settings)
     symbols = _promotion_review_symbols(settings, registry)
     if not symbols:
@@ -1085,7 +762,7 @@ def active_portfolio_status(settings: Settings) -> int:
     """
     from iris_bot.portfolio import active_portfolio_status_report, active_universe_status_report
     run_dir = build_run_directory(settings.data.runs_dir, "active_portfolio_status")
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     registry = load_strategy_profile_registry(settings)
     portfolio_report = active_portfolio_status_report(settings, registry)
     universe_report = active_universe_status_report(settings, registry)

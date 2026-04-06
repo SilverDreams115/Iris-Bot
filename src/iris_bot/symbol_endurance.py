@@ -4,7 +4,7 @@ import csv
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.artifacts import read_artifact_payload, wrap_artifact
 from iris_bot.config import Settings
@@ -18,7 +18,10 @@ REVIEW_ALLOWED_PROFILE_STATES = {"enabled", "caution", "validated", "blocked", "
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object at {path}")
+    return cast(dict[str, Any], raw)
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:
@@ -155,8 +158,7 @@ def _symbol_stability(symbol: str, cycle_dirs: list[Path], settings: Settings) -
     total_cycles_completed = 0
     for cycle_dir in cycle_dirs:
         health = _read_json(cycle_dir / "health_report.json")
-        soak_report = _read_json(cycle_dir / "soak_report.json")
-        decision = _read_json(cycle_dir / "go_no_go_report.json")
+        cycle_decision = _read_json(cycle_dir / "go_no_go_report.json")
         consistency = _endurance_consistency(cycle_dir)
         consistency_reports.append({"run_dir": str(cycle_dir), **consistency})
         closed_rows = _read_csv(cycle_dir / "closed_trades.csv")
@@ -176,7 +178,7 @@ def _symbol_stability(symbol: str, cycle_dirs: list[Path], settings: Settings) -
         cycle_metrics.append(
             {
                 "run_dir": str(cycle_dir),
-                "decision": decision.get("decision", "unknown"),
+                "decision": cycle_decision.get("decision", "unknown"),
                 "cycles_completed": consistency["health_cycle_count"],
                 "blocked_trades": blocked_count,
                 "execution_events": len(execution_rows),
@@ -190,6 +192,8 @@ def _symbol_stability(symbol: str, cycle_dirs: list[Path], settings: Settings) -
     expectancy_degradation = _degradation(expectancy_series)
     profit_factor_degradation = _degradation(profit_factor_series)
     critical_alerts = severity_summary.get("critical", 0)
+    decision: str
+    reasons: list[str]
     if not cycle_metrics:
         decision = "blocked"
         reasons = ["no_cycles_executed"]
@@ -265,10 +269,10 @@ def _apply_endurance_review_guards(
 def run_symbol_endurance(settings: Settings, only_enabled: bool) -> tuple[int, Path]:
     command_name = "enabled_symbols_soak" if only_enabled else "symbol_endurance"
     run_dir = build_run_directory(settings.data.runs_dir, command_name)
-    logger = configure_logging(run_dir, settings.logging.level)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     symbols = _select_endurance_symbols(settings, only_enabled)
     if not symbols:
-        logger.error("No hay simbolos elegibles para endurance")
+        logger.error("No symbols eligible for endurance testing")
         return 1, run_dir
     registry = load_strategy_profile_registry(settings)
     symbol_cycle_dirs: dict[str, list[Path]] = {}
@@ -315,7 +319,6 @@ def run_symbol_endurance(settings: Settings, only_enabled: bool) -> tuple[int, P
         "active_registry_profiles": registry.get("active_profiles", {}),
         "enabled_symbol_count": sum(1 for item in symbols_report.values() if item["decision"] == "go"),
     }
-    artifact_type = "enabled_symbols_soak" if only_enabled else "symbol_endurance"
     write_json_report(run_dir, "symbol_endurance_report.json", wrap_artifact("symbol_endurance", aggregate))
     write_json_report(run_dir, "symbol_stability_report.json", wrap_artifact("symbol_stability", aggregate))
     write_json_report(
@@ -364,11 +367,11 @@ def run_symbol_endurance(settings: Settings, only_enabled: bool) -> tuple[int, P
 def symbol_stability_report(settings: Settings) -> tuple[int, Path]:
     candidates = sorted(list(settings.data.runs_dir.glob("*_symbol_endurance")) + list(settings.data.runs_dir.glob("*_enabled_symbols_soak")))
     if not candidates:
-        raise FileNotFoundError("No hay corridas de endurance disponibles")
+        raise FileNotFoundError("No endurance runs available")
     run_dir = candidates[-1]
     payload = read_artifact_payload(run_dir / "symbol_stability_report.json", expected_type="symbol_stability")
     out_dir = build_run_directory(settings.data.runs_dir, "symbol_stability")
-    logger = configure_logging(out_dir, settings.logging.level)
+    logger = configure_logging(out_dir, settings.logging.level, settings.logging.format)
     write_json_report(out_dir, "symbol_stability_report.json", wrap_artifact("symbol_stability", payload))
     logger.info("symbol_stability source=%s run_dir=%s", run_dir, out_dir)
     return 0, out_dir
@@ -377,11 +380,11 @@ def symbol_stability_report(settings: Settings) -> tuple[int, Path]:
 def audit_endurance_reporting(settings: Settings) -> tuple[int, Path]:
     candidates = sorted(list(settings.data.runs_dir.glob("*_symbol_endurance")) + list(settings.data.runs_dir.glob("*_enabled_symbols_soak")))
     if not candidates:
-        raise FileNotFoundError("No hay corridas de endurance disponibles")
+        raise FileNotFoundError("No endurance runs available")
     source = candidates[-1]
     payload = read_artifact_payload(source / "endurance_consistency_report.json", expected_type="symbol_endurance")
     out_dir = build_run_directory(settings.data.runs_dir, "audit_endurance_reporting")
-    logger = configure_logging(out_dir, settings.logging.level)
+    logger = configure_logging(out_dir, settings.logging.level, settings.logging.format)
     write_json_report(out_dir, "endurance_consistency_report.json", wrap_artifact("symbol_endurance", payload))
     ok = all(
         all(report.get("ok", False) for report in symbol_payload.get("consistency_reports", []))

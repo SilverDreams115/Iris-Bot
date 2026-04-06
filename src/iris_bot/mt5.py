@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.config import MT5Config
 from iris_bot.data import Bar
@@ -60,6 +60,20 @@ class DryRunOrderResult:
             "request": self.request,
             "validations": [asdict(issue) for issue in self.validations],
         }
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    accepted: bool
+    retcode: int
+    comment: str
+    ticket: int | None     # MT5 order/position ticket on success
+    volume: float | None   # actual filled volume
+    price: float | None    # actual fill price
+    request: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -143,7 +157,8 @@ class MT5Client:
     def is_connected(self) -> bool:
         if self._mt5 is None or not self._connected:
             return False
-        info = self._mt5.terminal_info() if hasattr(self._mt5, "terminal_info") else None
+        mt5_module = self._mt5
+        info = mt5_module.terminal_info() if mt5_module is not None and hasattr(mt5_module, "terminal_info") else None
         return bool(info)
 
     def account_info(self) -> dict[str, Any] | None:
@@ -259,7 +274,7 @@ class MT5Client:
 
     def fetch_historical_bars(self, symbol: str, timeframe: str, count: int) -> list[Bar]:
         if self._mt5 is None:
-            raise RuntimeError("MT5 no esta conectado")
+            raise RuntimeError("MT5 is not connected")
 
         timeframe_code = resolve_mt5_timeframe(self._mt5, timeframe)
         rates = self._mt5.copy_rates_from_pos(symbol, timeframe_code, 0, count)
@@ -293,14 +308,18 @@ class MT5Client:
                 MT5ValidationIssue(
                     scope="connection",
                     code="not_connected",
-                    message="MT5 no esta conectado",
+                    message="MT5 is not connected",
                     details={},
                 )
             )
             return MT5ValidationReport(False, False, False, issues, symbol_reports)
 
         terminal_initialized = True
-        info = self._mt5.terminal_info() if hasattr(self._mt5, "terminal_info") else None
+        mt5_module = self._mt5
+        if mt5_module is not None and hasattr(mt5_module, "terminal_info"):
+            info = mt5_module.terminal_info()
+        else:
+            info = None
         if info is None:
             terminal_initialized = False
             issues.append(
@@ -338,7 +357,7 @@ class MT5Client:
             issue = MT5ValidationIssue(
                 scope="connection",
                 code="not_connected",
-                message="MT5 no esta conectado",
+                message="MT5 is not connected",
                 details={},
             )
             return DryRunOrderResult(False, "not_connected", None, None, [issue])
@@ -367,7 +386,7 @@ class MT5Client:
             issue = MT5ValidationIssue(
                 scope=f"symbol:{order.symbol}",
                 code="volume_invalid",
-                message="El volumen no esta alineado con min/step/max",
+                message="Volume is not aligned with min/step/max constraints",
                 details={"requested_volume": order.volume, "symbol_info": info},
             )
             return DryRunOrderResult(False, "volume_invalid", None, None, issues + [issue])
@@ -382,17 +401,17 @@ class MT5Client:
             )
             return DryRunOrderResult(False, "tick_unavailable", normalized_volume, None, issues + [issue])
 
-        supported_filling = self._supported_fillings(info["filling_mode"])
-        if not supported_filling:
+        candidate_fillings = self._candidate_fillings(int(info.get("filling_mode", -1)))
+        if not candidate_fillings:
             issue = MT5ValidationIssue(
                 scope=f"symbol:{order.symbol}",
                 code="filling_mode_unsupported",
-                message="No hay filling mode soportado",
+                message="No supported filling mode available",
                 details={"filling_mode": info["filling_mode"]},
             )
             return DryRunOrderResult(False, "filling_mode_unsupported", normalized_volume, None, issues + [issue])
 
-        request = self._build_request(order, normalized_volume, tick, supported_filling[0])
+        request = self._resolve_request_with_filling(order, normalized_volume, tick, candidate_fillings)
         malformed = self._validate_request_payload(request)
         if malformed:
             issue = MT5ValidationIssue(
@@ -404,6 +423,75 @@ class MT5Client:
             return DryRunOrderResult(False, "request_invalid", normalized_volume, request, issues + [issue])
 
         return DryRunOrderResult(True, "dry_run_only", normalized_volume, request, issues)
+
+    def send_market_order(self, order: OrderRequest) -> OrderResult:
+        """Send a real market order to MT5. Validates via dry_run first, then calls order_send."""
+        dry = self.dry_run_market_order(order)
+        if not dry.accepted:
+            return OrderResult(
+                accepted=False,
+                retcode=-1,
+                comment=dry.reason,
+                ticket=None,
+                volume=None,
+                price=None,
+                request=dry.request or {},
+            )
+        if self._mt5 is None:
+            return OrderResult(False, -1, "not_connected", None, None, None, dry.request or {})
+        result = self._mt5.order_send(dry.request)
+        if result is None:
+            return OrderResult(False, -1, "order_send_returned_none", None, None, None, dry.request or {})
+        retcode = int(getattr(result, "retcode", -1))
+        retcode_done = getattr(self._mt5, "TRADE_RETCODE_DONE", 10009)
+        accepted = retcode == retcode_done
+        return OrderResult(
+            accepted=accepted,
+            retcode=retcode,
+            comment=str(getattr(result, "comment", "")),
+            ticket=int(getattr(result, "order", 0)) or None,
+            volume=float(getattr(result, "volume", 0.0)) or None,
+            price=float(getattr(result, "price", 0.0)) or None,
+            request=dry.request or {},
+        )
+
+    def close_position(self, ticket: int, symbol: str, volume: float, side: str) -> OrderResult:
+        """Close an open MT5 position by ticket. side is the original position side ('buy'|'sell')."""
+        if not self._connected or self._mt5 is None:
+            return OrderResult(False, -1, "not_connected", None, None, None, {})
+        close_side = "sell" if side == "buy" else "buy"
+        order_type = self._mt5.ORDER_TYPE_SELL if close_side == "sell" else self._mt5.ORDER_TYPE_BUY
+        tick = self._mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return OrderResult(False, -1, "tick_unavailable", None, None, None, {})
+        price = float(tick.bid if close_side == "sell" else tick.ask)
+        symbol_info = self._validate_symbol(symbol)["symbol_info"]
+        fillings = self._candidate_fillings(int(symbol_info.get("filling_mode", -1)))
+        if not fillings:
+            return OrderResult(False, -1, "filling_mode_unsupported", None, None, None, {})
+        request: dict[str, Any] = self._resolve_close_request_with_filling(
+            ticket=ticket,
+            symbol=symbol,
+            volume=volume,
+            order_type=order_type,
+            price=price,
+            fillings=fillings,
+        )
+        result = self._mt5.order_send(request)
+        if result is None:
+            return OrderResult(False, -1, "order_send_returned_none", None, None, None, request)
+        retcode = int(getattr(result, "retcode", -1))
+        retcode_done = getattr(self._mt5, "TRADE_RETCODE_DONE", 10009)
+        accepted = retcode == retcode_done
+        return OrderResult(
+            accepted=accepted,
+            retcode=retcode,
+            comment=str(getattr(result, "comment", "")),
+            ticket=int(getattr(result, "order", 0)) or None,
+            volume=float(getattr(result, "volume", 0.0)) or None,
+            price=float(getattr(result, "price", 0.0)) or None,
+            request=request,
+        )
 
     def _validate_symbol(self, symbol: str) -> dict[str, Any]:
         assert self._mt5 is not None
@@ -447,7 +535,7 @@ class MT5Client:
             issues.append(
                 {
                     "code": "min_lot_invalid",
-                    "message": "volume_min invalido",
+                    "message": "volume_min is invalid",
                     "details": {"volume_min": volume_min},
                 }
             )
@@ -455,7 +543,7 @@ class MT5Client:
             issues.append(
                 {
                     "code": "lot_step_invalid",
-                    "message": "volume_step invalido",
+                    "message": "volume_step is invalid",
                     "details": {"volume_step": volume_step},
                 }
             )
@@ -463,29 +551,113 @@ class MT5Client:
             issues.append(
                 {
                     "code": "max_lot_invalid",
-                    "message": "volume_max invalido",
+                    "message": "volume_max is invalid",
                     "details": {"volume_max": volume_max, "volume_min": volume_min},
                 }
             )
-        if not self._supported_fillings(int(info.get("filling_mode", -1))):
+        if not self._candidate_fillings(int(info.get("filling_mode", -1))):
             issues.append(
                 {
                     "code": "filling_mode_invalid",
-                    "message": "filling_mode no soportado",
+                    "message": "filling_mode not supported",
                     "details": {"filling_mode": info.get("filling_mode")},
                 }
             )
         return {"ok": not issues, "issues": issues, "symbol_info": info}
 
-    def _supported_fillings(self, filling_mode: int) -> list[int]:
+    def _candidate_fillings(self, filling_mode: int) -> list[int]:
         assert self._mt5 is not None
-        supported: list[int] = []
-        for attr in ("ORDER_FILLING_IOC", "ORDER_FILLING_FOK", "ORDER_FILLING_RETURN"):
+        constants = self._known_fillings()
+        preferred: list[int] = []
+        for value in constants:
+            if value == filling_mode and value not in preferred:
+                preferred.append(value)
+        for value in constants:
+            if value != 0 and filling_mode >= 0 and filling_mode & value == value and value not in preferred:
+                preferred.append(value)
+        return preferred
+
+    def _known_fillings(self) -> list[int]:
+        assert self._mt5 is not None
+        constants: list[int] = []
+        for attr in ("ORDER_FILLING_FOK", "ORDER_FILLING_IOC", "ORDER_FILLING_RETURN"):
             if hasattr(self._mt5, attr):
                 value = int(getattr(self._mt5, attr))
-                if filling_mode == value or filling_mode & value == value:
-                    supported.append(value)
-        return supported
+                if value not in constants:
+                    constants.append(value)
+        return constants
+
+    def _resolve_request_with_filling(
+        self,
+        order: OrderRequest,
+        normalized_volume: float,
+        tick: Any,
+        fillings: list[int],
+    ) -> dict[str, Any]:
+        expanded_fillings = list(fillings)
+        if self._mt5 is not None and hasattr(self._mt5, "order_check"):
+            for filling in self._known_fillings():
+                if filling not in expanded_fillings:
+                    expanded_fillings.append(filling)
+        for filling in expanded_fillings:
+            request = self._build_request(order, normalized_volume, tick, filling)
+            if self._order_check_accepts(request):
+                return request
+        return self._build_request(order, normalized_volume, tick, fillings[0])
+
+    def _resolve_close_request_with_filling(
+        self,
+        *,
+        ticket: int,
+        symbol: str,
+        volume: float,
+        order_type: int,
+        price: float,
+        fillings: list[int],
+    ) -> dict[str, Any]:
+        assert self._mt5 is not None
+        expanded_fillings = list(fillings)
+        if hasattr(self._mt5, "order_check"):
+            for filling in self._known_fillings():
+                if filling not in expanded_fillings:
+                    expanded_fillings.append(filling)
+        for filling in expanded_fillings:
+            request = {
+                "action": self._mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume,
+                "type": order_type,
+                "position": ticket,
+                "price": price,
+                "deviation": 20,
+                "magic": self.config.magic_number,
+                "comment": f"{self.config.comment_tag} close",
+                "type_time": self._mt5.ORDER_TIME_GTC,
+                "type_filling": filling,
+            }
+            if self._order_check_accepts(request):
+                return request
+        return {
+            "action": self._mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": self.config.magic_number,
+            "comment": f"{self.config.comment_tag} close",
+            "type_time": self._mt5.ORDER_TIME_GTC,
+            "type_filling": fillings[0],
+        }
+
+    def _order_check_accepts(self, request: dict[str, Any]) -> bool:
+        if self._mt5 is None or not hasattr(self._mt5, "order_check"):
+            return False
+        result = self._mt5.order_check(request)
+        if result is None:
+            return False
+        return int(getattr(result, "retcode", -1)) == 0
 
     def _normalize_volume(
         self,
@@ -576,5 +748,5 @@ def resolve_mt5_timeframe(mt5_module: Any, timeframe: str) -> int:
     }
     attr_name = mapping.get(timeframe)
     if attr_name is None or not hasattr(mt5_module, attr_name):
-        raise ValueError(f"Timeframe no soportado para MT5: {timeframe}")
-    return getattr(mt5_module, attr_name)
+        raise ValueError(f"Unsupported timeframe for MT5: {timeframe}")
+    return cast(int, getattr(mt5_module, attr_name))

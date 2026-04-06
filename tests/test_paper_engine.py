@@ -3,7 +3,7 @@ import json
 
 from iris_bot.config import BacktestConfig, RiskConfig
 from iris_bot.operational import ExitPolicyConfig, write_operational_artifacts
-from iris_bot.paper import ExecutionDecision, OrderIntent, run_paper_engine
+from iris_bot.paper import ExecutionDecision, OrderIntent, PaperSessionConfig, run_paper_engine
 from iris_bot.processed_dataset import ProcessedRow
 
 
@@ -52,6 +52,21 @@ TEST_BACKTEST = BacktestConfig(
 )
 
 
+def _base_config(**overrides) -> PaperSessionConfig:
+    defaults = dict(
+        mode="paper",
+        threshold=0.5,
+        trading_symbols=("EURUSD",),
+        one_position_per_symbol=True,
+        allow_long=True,
+        allow_short=True,
+        backtest=TEST_BACKTEST,
+        risk=RiskConfig(),
+    )
+    defaults.update(overrides)
+    return PaperSessionConfig(**defaults)
+
+
 def test_paper_engine_opens_and_closes_position() -> None:
     start = datetime(2026, 1, 1, 0, 0, 0)
     rows = [
@@ -62,17 +77,9 @@ def test_paper_engine_opens_and_closes_position() -> None:
     probabilities = [_prob_signal(), _prob_neutral(), _prob_neutral()]
 
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(),
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
-        exit_policy_config=ExitPolicyConfig(),
+        _base_config(exit_policy_config=ExitPolicyConfig()),
+        rows,
+        probabilities,
     )
 
     assert len(artifacts.closed_trades) == 1
@@ -98,16 +105,9 @@ def test_paper_engine_rejects_cooldown_and_daily_loss() -> None:
     ]
 
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(max_daily_loss_usd=0.01, cooldown_bars_after_loss=2),
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
+        _base_config(risk=RiskConfig(max_daily_loss_usd=0.01, cooldown_bars_after_loss=2)),
+        rows,
+        probabilities,
     )
 
     reasons = {event.reason for event in artifacts.events if event.event_type == "signal_rejected"}
@@ -132,16 +132,9 @@ def test_paper_engine_rejects_invalid_symbol_and_duplicate_position() -> None:
     ]
 
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(),
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
+        _base_config(),
+        rows,
+        probabilities,
     )
 
     assert artifacts.state.blocked_trades_summary["symbol_not_configured"] >= 1
@@ -158,16 +151,12 @@ def test_paper_engine_enforces_max_open_positions() -> None:
     probabilities = [_prob_signal(), _prob_signal(), _prob_neutral(), _prob_neutral()]
 
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(max_open_positions=1),
-        trading_symbols=("EURUSD", "GBPUSD"),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
+        _base_config(
+            trading_symbols=("EURUSD", "GBPUSD"),
+            risk=RiskConfig(max_open_positions=1),
+        ),
+        rows,
+        probabilities,
     )
 
     assert artifacts.state.blocked_trades_summary["max_open_positions"] >= 1
@@ -186,17 +175,9 @@ def test_demo_dry_validator_records_order_simulation() -> None:
         )
 
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(),
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="demo_dry",
-        execution_validator=validator,
+        _base_config(mode="demo_dry", execution_validator=validator),
+        rows,
+        probabilities,
     )
 
     assert any(event.event_type == "order_simulated" for event in artifacts.events)
@@ -207,16 +188,9 @@ def test_journals_and_reports_are_written(tmp_path) -> None:
     rows = [_row(start), _row(start + timedelta(minutes=15)), _row(start + timedelta(minutes=30))]
     probabilities = [_prob_signal(), _prob_neutral(), _prob_neutral()]
     artifacts = run_paper_engine(
-        rows=rows,
-        probabilities=probabilities,
-        threshold=0.5,
-        backtest=TEST_BACKTEST,
-        risk=RiskConfig(),
-        trading_symbols=("EURUSD",),
-        one_position_per_symbol=True,
-        allow_long=True,
-        allow_short=True,
-        mode="paper",
+        _base_config(),
+        rows,
+        probabilities,
     )
 
     write_operational_artifacts(

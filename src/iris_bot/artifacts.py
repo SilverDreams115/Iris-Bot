@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 ARTIFACT_SCHEMA_VERSIONS = {
@@ -61,6 +61,13 @@ def _checksum_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object at {path}")
+    return cast(dict[str, Any], raw)
+
+
 def wrap_artifact(
     artifact_type: str,
     payload: dict[str, Any],
@@ -79,7 +86,7 @@ def wrap_artifact(
 
 
 def read_artifact_payload(path: Path, expected_type: str | None = None) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_json_dict(path)
     if "artifact_type" not in payload:
         return payload
     if expected_type is not None and payload.get("artifact_type") != expected_type:
@@ -88,11 +95,11 @@ def read_artifact_payload(path: Path, expected_type: str | None = None) -> dict[
     current = _checksum_payload(payload.get("payload", {}))
     if checksum != current:
         raise ValueError(f"artifact checksum mismatch for {path}")
-    return payload.get("payload", {})
+    return cast(dict[str, Any], payload.get("payload", {}))
 
 
 def artifact_schema_report(path: Path, expected_type: str | None = None) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _load_json_dict(path)
     if "artifact_type" not in payload:
         return {
             "path": str(path),

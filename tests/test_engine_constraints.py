@@ -11,7 +11,6 @@ Constraints verified:
 """
 from datetime import datetime, timedelta
 
-import pytest
 
 from iris_bot.backtest import run_backtest_engine
 from iris_bot.config import BacktestConfig, RiskConfig

@@ -11,12 +11,12 @@ import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.artifacts import read_artifact_payload, wrap_artifact
 from iris_bot.config import Settings
 from iris_bot.operational import atomic_write_json
-from iris_bot.symbols import SymbolStrategyProfile, default_symbol_strategy_profile, load_symbol_strategy_profiles, strategy_profiles_path
+from iris_bot.symbols import SymbolStrategyProfile, default_symbol_strategy_profile, strategy_profiles_path
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +53,16 @@ def _registry_default() -> dict[str, Any]:
     return {"profiles": {}, "active_profiles": {}}
 
 
+def _json_dict(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("Expected JSON object")
+    return cast(dict[str, Any], raw)
+
+
 def _entry_checksum_ok(entry: dict[str, Any]) -> bool:
     payload = dict(entry.get("profile_payload", {}))
-    return entry.get("checksum", "") == _profile_checksum(payload)
+    checksum = entry.get("checksum", "")
+    return isinstance(checksum, str) and checksum == _profile_checksum(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +96,7 @@ def save_strategy_profile_registry(settings: Settings, payload: dict[str, Any]) 
 def _find_entry(registry: dict[str, Any], symbol: str, profile_id: str) -> dict[str, Any] | None:
     for item in registry.get("profiles", {}).get(symbol, []):
         if item.get("profile_id") == profile_id:
-            return item
+            return cast(dict[str, Any], item)
     return None
 
 
@@ -112,11 +119,11 @@ def _latest_entry_by_state(
     if not candidates:
         return None
     candidates.sort(key=lambda item: item.get("created_at", ""))
-    return candidates[-1]
+    return cast(dict[str, Any], candidates[-1])
 
 
 def _build_rollback_snapshot(entry: dict[str, Any]) -> dict[str, Any]:
-    snapshot = json.loads(json.dumps(entry))
+    snapshot = _json_dict(json.loads(json.dumps(entry)))
     created_at = datetime.now(tz=UTC).isoformat()
     snapshot_id = f"{entry['profile_id']}-rollback-{entry['checksum'][:8]}"
     payload = dict(snapshot.get("profile_payload", {}))
@@ -154,7 +161,7 @@ def _read_strategy_profiles_payload(
     settings: Settings,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     path = strategy_profiles_path(settings)
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = _json_dict(json.loads(path.read_text(encoding="utf-8")))
     payload = read_artifact_payload(path, expected_type="strategy_profiles")
     return raw, payload
 
@@ -166,6 +173,7 @@ def _merge_symbol_profile(
     merged.update(payload)
     merged["allowed_timeframes"] = tuple(merged["allowed_timeframes"])
     merged["allowed_sessions"] = tuple(merged["allowed_sessions"])
+    merged.pop("enabled", None)  # derived property — not a constructor argument
     return SymbolStrategyProfile(**merged)
 
 

@@ -25,7 +25,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from iris_bot.config import Settings
 
@@ -38,11 +38,17 @@ def run_index_path(settings: Settings) -> Path:
     return settings.data.runtime_dir / _INDEX_FILENAME
 
 
+def _coerce_index(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"schema_version": _SCHEMA_VERSION, "entries": []}
+    return cast(dict[str, Any], raw)
+
+
 def _load_index(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"schema_version": _SCHEMA_VERSION, "entries": []}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = _coerce_index(json.loads(path.read_text(encoding="utf-8")))
         if not isinstance(raw.get("entries"), list):
             return {"schema_version": _SCHEMA_VERSION, "entries": []}
         return raw
@@ -116,7 +122,7 @@ def get_latest_run(
         return None
     # Sort by registered_at (ISO 8601 string sorts correctly for UTC timestamps)
     entries.sort(key=lambda e: e.get("registered_at", ""))
-    return entries[-1]
+    return cast(dict[str, Any], entries[-1])
 
 
 def get_all_runs(

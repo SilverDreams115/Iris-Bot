@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 from iris_bot.config import Settings
+from iris_bot.edge_diagnostics import (
+    run_audit_class_separability,
+    run_audit_edge_baseline,
+    run_audit_edge_hypotheses,
+    run_audit_horizon_exits,
+    run_audit_label_noise,
+    run_audit_regime_value,
+)
 from iris_bot.experiments import run_experiment
 from iris_bot.quant_experiments import (
     audit_effective_config_command,
@@ -8,7 +16,20 @@ from iris_bot.quant_experiments import (
     compare_experiment_results_command,
     run_experiment_matrix,
 )
+from iris_bot.regime_rework import (
+    run_audit_regime_features,
+    run_compare_regime_experiments,
+    run_evaluate_regime_demo_candidate,
+    run_fetch_extended_history,
+    run_regime_aware_rework,
+)
 from iris_bot.structural_rework import run_structural_rework_evaluation
+from iris_bot.symbol_focused_rework import (
+    run_audit_symbol_signal,
+    run_compare_symbol_variants,
+    run_evaluate_demo_execution_candidate,
+    run_symbol_structural_rework,
+)
 from iris_bot.symbol_research import run_symbol_research
 from iris_bot.symbol_validation import (
     audit_strategy_block_causes,
@@ -70,3 +91,63 @@ def symbol_go_no_go_command(settings: Settings) -> int:
 
 def audit_strategy_block_causes_command(settings: Settings) -> int:
     return audit_strategy_block_causes(settings)
+
+
+def run_symbol_structural_rework_command(settings: Settings) -> int:
+    return run_symbol_structural_rework(settings)
+
+
+def audit_symbol_signal_command(settings: Settings) -> int:
+    return run_audit_symbol_signal(settings)
+
+
+def compare_symbol_variants_command(settings: Settings) -> int:
+    return run_compare_symbol_variants(settings)
+
+
+def evaluate_demo_execution_candidate_command(settings: Settings) -> int:
+    return run_evaluate_demo_execution_candidate(settings)
+
+
+def fetch_extended_history_command(settings: Settings) -> int:
+    return run_fetch_extended_history(settings)
+
+
+def audit_regime_features_command(settings: Settings) -> int:
+    return run_audit_regime_features(settings)
+
+
+def run_regime_aware_rework_command(settings: Settings) -> int:
+    return run_regime_aware_rework(settings)
+
+
+def compare_regime_experiments_command(settings: Settings) -> int:
+    return run_compare_regime_experiments(settings)
+
+
+def evaluate_regime_demo_candidate_command(settings: Settings) -> int:
+    return run_evaluate_regime_demo_candidate(settings)
+
+
+def audit_edge_baseline_command(settings: Settings) -> int:
+    return run_audit_edge_baseline(settings)
+
+
+def audit_label_noise_command(settings: Settings) -> int:
+    return run_audit_label_noise(settings)
+
+
+def audit_horizon_exits_command(settings: Settings) -> int:
+    return run_audit_horizon_exits(settings)
+
+
+def audit_regime_value_command(settings: Settings) -> int:
+    return run_audit_regime_value(settings)
+
+
+def audit_class_separability_command(settings: Settings) -> int:
+    return run_audit_class_separability(settings)
+
+
+def audit_edge_hypotheses_command(settings: Settings) -> int:
+    return run_audit_edge_hypotheses(settings)

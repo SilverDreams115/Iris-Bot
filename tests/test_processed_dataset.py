@@ -67,6 +67,10 @@ def test_processed_dataset_exposes_new_regime_features_and_warmup_20() -> None:
         "return_autocorr_10",
         "efficiency_ratio_10",
         "volume_percentile_20",
+        "adx_14",
+        "trend_regime_flag",
+        "high_volatility_regime_flag",
+        "low_volatility_regime_flag",
     ):
         assert feature_name in dataset.rows[0].features
         assert isfinite(dataset.rows[0].features[feature_name])
@@ -97,3 +101,7 @@ def test_efficiency_ratio_and_volume_percentile_stay_in_expected_bounds() -> Non
 
     assert 0.0 <= row.features["efficiency_ratio_10"] <= 1.0
     assert 0.0 <= row.features["volume_percentile_20"] <= 1.0
+    assert 0.0 <= row.features["adx_14"] <= 100.0
+    assert row.features["trend_regime_flag"] in (0.0, 1.0)
+    assert row.features["high_volatility_regime_flag"] in (0.0, 1.0)
+    assert row.features["low_volatility_regime_flag"] in (0.0, 1.0)

@@ -54,6 +54,10 @@ FEATURE_NAMES_BASE = [
     "volume_percentile_20",        # rank of current volume within last 20 bars
     # --- Regime ---
     "atr_regime_percentile",       # current ATR_10 as percentile of 50-bar ATR_10 history
+    "adx_14",                      # Average Directional Index over 14 bars
+    "trend_regime_flag",           # 1 when ADX indicates trend, else 0
+    "high_volatility_regime_flag", # 1 when ATR percentile is high, else 0
+    "low_volatility_regime_flag",  # 1 when ATR percentile is low, else 0
     # --- Sessions ---
     "session_asia",
     "session_london",
@@ -210,6 +214,56 @@ def _atr_regime_percentile(bars: list[Bar]) -> float:
     return _volume_percentile(atrs, atrs[-1])
 
 
+def _adx_14(bars: list[Bar]) -> float:
+    """
+    Approximate Wilder ADX using a 14-period window.
+
+    Returns a bounded value in [0, 100]. When there is insufficient history,
+    returns 0.0 to encode "no explicit trend evidence yet".
+    """
+    period = 14
+    if len(bars) < period + 1:
+        return 0.0
+
+    tr_values: list[float] = []
+    plus_dm_values: list[float] = []
+    minus_dm_values: list[float] = []
+    for previous, current in zip(bars[:-1], bars[1:], strict=False):
+        up_move = current.high - previous.high
+        down_move = previous.low - current.low
+        plus_dm = up_move if up_move > down_move and up_move > 0.0 else 0.0
+        minus_dm = down_move if down_move > up_move and down_move > 0.0 else 0.0
+        true_range = max(
+            current.high - current.low,
+            abs(current.high - previous.close),
+            abs(current.low - previous.close),
+        )
+        tr_values.append(true_range)
+        plus_dm_values.append(plus_dm)
+        minus_dm_values.append(minus_dm)
+
+    if len(tr_values) < period:
+        return 0.0
+
+    dx_values: list[float] = []
+    for start in range(0, len(tr_values) - period + 1):
+        tr_window = tr_values[start : start + period]
+        plus_window = plus_dm_values[start : start + period]
+        minus_window = minus_dm_values[start : start + period]
+        tr_sum = sum(tr_window)
+        if tr_sum <= 0.0:
+            dx_values.append(0.0)
+            continue
+        plus_di = 100.0 * _safe_div(sum(plus_window), tr_sum)
+        minus_di = 100.0 * _safe_div(sum(minus_window), tr_sum)
+        directional_sum = plus_di + minus_di
+        dx_values.append(100.0 * _safe_div(abs(plus_di - minus_di), directional_sum))
+
+    if not dx_values:
+        return 0.0
+    return max(0.0, min(100.0, _rolling_mean(dx_values[-period:])))
+
+
 def _cross_symbol_features(
     symbol: str,
     current_return_1: float,
@@ -288,8 +342,6 @@ def _compute_feature_row(
     close_1 = series[index - 1].close
     close_3 = series[index - 3].close
     close_5 = series[index - 5].close
-    close_10 = series[index - 10].close
-
     last_5  = series[index - 4  : index + 1]
     last_10 = series[index - 9  : index + 1]
     last_11 = series[index - 10 : index + 1]
@@ -328,6 +380,9 @@ def _compute_feature_row(
 
     return_1 = _safe_div(current.close - close_1, close_1)
 
+    atr_regime_percentile = _atr_regime_percentile(last_50_regime)
+    adx_14 = _adx_14(last_51)
+
     features: dict[str, float] = {
         # Returns & momentum
         "return_1":   return_1,
@@ -362,7 +417,11 @@ def _compute_feature_row(
         "volume_zscore_20":    0.0 if volume_std_20 == 0.0 else (current.volume - volume_mean_20) / volume_std_20,
         "volume_percentile_20": _volume_percentile(volume_window_20, current.volume),
         # Regime
-        "atr_regime_percentile": _atr_regime_percentile(last_50_regime),
+        "atr_regime_percentile": atr_regime_percentile,
+        "adx_14": adx_14,
+        "trend_regime_flag": 1.0 if adx_14 >= 25.0 else 0.0,
+        "high_volatility_regime_flag": 1.0 if atr_regime_percentile >= 0.67 else 0.0,
+        "low_volatility_regime_flag": 1.0 if atr_regime_percentile <= 0.33 else 0.0,
         # Sessions
         "session_asia":     session_asia,
         "session_london":   session_london,

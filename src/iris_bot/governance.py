@@ -64,6 +64,168 @@ __all__ = [
 ]
 
 
+def _build_promotion_gate_matrix(
+    profile: dict[str, Any] | None,
+    strategy_schema: dict[str, Any],
+    lifecycle: dict[str, Any] | None,
+    lifecycle_symbol: dict[str, Any],
+    lifecycle_age_hours: float | None,
+    endurance: dict[str, Any] | None,
+    endurance_symbol: dict[str, Any],
+    alerts: dict[str, Any],
+    endo_metrics: dict[str, Any],
+    gate_cfg: Any,
+) -> dict[str, bool]:
+    lifecycle_recent = (
+        lifecycle_age_hours is not None and lifecycle_age_hours <= gate_cfg.lifecycle_max_age_hours
+    ) if lifecycle is not None else False
+    profit_factor_floor_ok = (
+        endo_metrics["avg_profit_factor"] is not None
+        and endo_metrics["avg_profit_factor"] >= gate_cfg.min_profit_factor
+    ) if endurance is not None else False
+    expectancy_floor_ok = (
+        endo_metrics["avg_expectancy_usd"] is not None
+        and endo_metrics["avg_expectancy_usd"] >= gate_cfg.min_expectancy_usd
+    ) if endurance is not None else False
+    no_trade_ratio_ok = (
+        endo_metrics["no_trade_ratio"] is None
+        or endo_metrics["no_trade_ratio"] <= gate_cfg.max_no_trade_ratio
+    ) if endurance is not None else False
+    blocked_ratio_ok = (
+        endo_metrics["blocked_trades_ratio"] is None
+        or endo_metrics["blocked_trades_ratio"] <= gate_cfg.max_blocked_trades_ratio
+    ) if endurance is not None else False
+    return {
+        "validated_profile_present": profile is not None,
+        "profile_checksum_ok": _entry_checksum_ok(profile) if profile is not None else False,
+        "schema_compatible": strategy_schema.get("ok", False),
+        "lifecycle_evidence_present": lifecycle is not None,
+        "lifecycle_clean": (
+            int(lifecycle_symbol.get("critical_mismatch_count", 0) or 0) <= gate_cfg.lifecycle_max_critical
+        ) if lifecycle is not None else False,
+        "lifecycle_audit_ok": bool((lifecycle or {}).get("audit_ok", False)) if lifecycle is not None else False,
+        "lifecycle_evidence_recent": lifecycle_recent,
+        "endurance_present": endurance is not None,
+        "endurance_decision_go": endurance_symbol.get("decision") == "go" if endurance is not None else False,
+        "endurance_cycles_sufficient": (
+            endo_metrics["cycles_completed"] >= gate_cfg.endurance_min_cycles
+        ) if endurance is not None else False,
+        "endurance_min_trades_met": endo_metrics["trade_count"] >= gate_cfg.endurance_min_trades,
+        "critical_alerts_absent": int(alerts.get("critical", 0) or 0) == 0,
+        "profit_factor_floor_ok": profit_factor_floor_ok,
+        "expectancy_floor_ok": expectancy_floor_ok,
+        "no_trade_ratio_ok": no_trade_ratio_ok,
+        "blocked_trades_ratio_ok": blocked_ratio_ok,
+        "no_expectancy_degradation_gate_breach": (
+            float(endurance_symbol.get("expectancy_degradation_pct", 0.0) or 0.0)
+            <= gate_cfg.max_expectancy_degradation_pct
+        ) if endurance is not None else False,
+        "no_profit_factor_degradation_gate_breach": (
+            float(endurance_symbol.get("profit_factor_degradation_pct", 0.0) or 0.0)
+            <= gate_cfg.max_profit_factor_degradation_pct
+        ) if endurance is not None else False,
+    }
+
+
+def _apply_gate_decisions(
+    symbol: str,
+    gate_matrix: dict[str, bool],
+    gate_cfg: Any,
+    lifecycle_age_hours: float | None,
+    endurance_symbol: dict[str, Any],
+    endo_metrics: dict[str, Any],
+    *,
+    strict: bool,
+) -> tuple[str, str, list[str]]:
+    """Return (final_decision, severity, reasons) by walking the gate matrix."""
+    reasons: list[str] = []
+    severity = "info"
+    final_decision = "KEEP_VALIDATED"
+
+    def block(reason: str) -> None:
+        nonlocal final_decision, severity
+        final_decision = "REVERT_TO_BLOCKED"
+        severity = "error"
+        reasons.append(reason)
+
+    def caution(reason: str) -> None:
+        nonlocal final_decision, severity
+        if final_decision != "REVERT_TO_BLOCKED":
+            final_decision = "MOVE_TO_CAUTION"
+            severity = "warning"
+        reasons.append(reason)
+
+    if symbol == "USDJPY":
+        block("symbol_out_of_scope_for_promotion")
+
+    if not gate_matrix["validated_profile_present"]:
+        block("validated_profile_missing")
+    if gate_matrix["validated_profile_present"] and not gate_matrix["profile_checksum_ok"]:
+        block("profile_checksum_incompatible")
+    if not gate_matrix["schema_compatible"]:
+        block("strategy_profiles_schema_incompatible")
+
+    if final_decision != "REVERT_TO_BLOCKED":
+        # Lifecycle gates
+        if not gate_matrix["lifecycle_evidence_present"]:
+            if strict:
+                block("missing_lifecycle_evidence_blocks_promotion")
+            else:
+                reasons.append("missing_lifecycle_validation")
+        else:
+            if not gate_matrix["lifecycle_clean"]:
+                block("lifecycle_critical_mismatch")
+            if gate_cfg.require_lifecycle_audit_ok and not gate_matrix["lifecycle_audit_ok"]:
+                block("lifecycle_audit_not_confirmed_blocks_promotion")
+            if not gate_matrix["lifecycle_evidence_recent"]:
+                block(
+                    f"lifecycle_evidence_too_old:{lifecycle_age_hours:.1f}h>max_{gate_cfg.lifecycle_max_age_hours:.0f}h"
+                    if lifecycle_age_hours is not None else "lifecycle_evidence_age_unknown"
+                )
+
+        # Endurance gates
+        if not gate_matrix["endurance_present"]:
+            if strict:
+                block("missing_endurance_evidence_blocks_promotion")
+            else:
+                reasons.append("missing_endurance_validation")
+        else:
+            if not gate_matrix["endurance_decision_go"]:
+                decision_val = endurance_symbol.get("decision", "missing")
+                if strict:
+                    block(f"endurance_decision={decision_val}_blocks_promotion")
+                else:
+                    caution(f"endurance_decision={decision_val}")
+            if not gate_matrix["endurance_cycles_sufficient"]:
+                block(f"insufficient_endurance_cycles:{endo_metrics['cycles_completed']}<{gate_cfg.endurance_min_cycles}")
+            if not gate_matrix["endurance_min_trades_met"]:
+                block(f"insufficient_endurance_trades:{endo_metrics['trade_count']}<{gate_cfg.endurance_min_trades}")
+            if not gate_matrix["critical_alerts_absent"]:
+                block("critical_alerts_present_blocks_promotion")
+            if not gate_matrix["profit_factor_floor_ok"]:
+                pf_val = endo_metrics["avg_profit_factor"]
+                block(f"profit_factor_below_floor:{pf_val:.3f}<{gate_cfg.min_profit_factor}" if pf_val is not None else "profit_factor_unavailable")
+            if not gate_matrix["expectancy_floor_ok"]:
+                ex_val = endo_metrics["avg_expectancy_usd"]
+                block(f"expectancy_below_floor:{ex_val:.3f}<{gate_cfg.min_expectancy_usd}" if ex_val is not None else "expectancy_unavailable")
+            if not gate_matrix["no_trade_ratio_ok"]:
+                ntr = endo_metrics["no_trade_ratio"]
+                block(f"no_trade_ratio_exceeded:{ntr:.3f}>{gate_cfg.max_no_trade_ratio}" if ntr is not None else "no_trade_ratio_check_failed")
+            if not gate_matrix["blocked_trades_ratio_ok"]:
+                btr = endo_metrics["blocked_trades_ratio"]
+                block(f"blocked_trades_ratio_exceeded:{btr:.3f}>{gate_cfg.max_blocked_trades_ratio}" if btr is not None else "blocked_trades_ratio_check_failed")
+            if not gate_matrix["no_expectancy_degradation_gate_breach"]:
+                caution("expectancy_degradation_above_gate")
+            if not gate_matrix["no_profit_factor_degradation_gate_breach"]:
+                caution("profit_factor_degradation_above_gate")
+
+    if final_decision == "KEEP_VALIDATED" and all(gate_matrix.values()):
+        final_decision = "APPROVED_DEMO"
+        reasons.append("validated_endurance_lifecycle_passed")
+
+    return final_decision, severity, reasons
+
+
 def _promotion_review_for_symbol(
     settings: Settings,
     symbol: str,
@@ -87,214 +249,18 @@ def _promotion_review_for_symbol(
     lifecycle = _latest_lifecycle_evidence(settings)
     endurance = _latest_endurance_evidence(settings, symbol)
     lifecycle_symbol = ((lifecycle or {}).get("payload", {}) or {}).get("symbols", {}).get(symbol, {})
-    endurance_payload = ((endurance or {}).get("payload", {}) or {})
-    endurance_symbol = endurance_payload.get("symbols", {}).get(symbol, {})
-    reasons: list[str] = []
-    severity = "info"
-    final_decision = "KEEP_VALIDATED"
+    endurance_symbol = ((endurance or {}).get("payload", {}) or {}).get("symbols", {}).get(symbol, {})
     alerts = endurance_symbol.get("alerts_by_severity", {}) if isinstance(endurance_symbol, dict) else {}
     endo_metrics = _compute_endurance_gate_metrics(endurance_symbol)
-    trade_count = endo_metrics["trade_count"]
-
-    # --- Compute lifecycle age ---
     lifecycle_age_hours = _lifecycle_evidence_age_hours(lifecycle)
 
-    # --- Hard gate matrix (all must be True for APPROVED_DEMO) ---
-    # Lifecycle age check
-    lifecycle_recent = (
-        lifecycle_age_hours is not None
-        and lifecycle_age_hours <= gate_cfg.lifecycle_max_age_hours
-    ) if lifecycle is not None else False
-
-    # Endurance economic floors
-    profit_factor_floor_ok = (
-        endo_metrics["avg_profit_factor"] is not None
-        and endo_metrics["avg_profit_factor"] >= gate_cfg.min_profit_factor
-    ) if endurance is not None else False
-    expectancy_floor_ok = (
-        endo_metrics["avg_expectancy_usd"] is not None
-        and endo_metrics["avg_expectancy_usd"] >= gate_cfg.min_expectancy_usd
-    ) if endurance is not None else False
-
-    # Signal efficiency checks
-    no_trade_ratio_ok = (
-        endo_metrics["no_trade_ratio"] is None  # insufficient data to check
-        or endo_metrics["no_trade_ratio"] <= gate_cfg.max_no_trade_ratio
-    ) if endurance is not None else False
-    blocked_ratio_ok = (
-        endo_metrics["blocked_trades_ratio"] is None
-        or endo_metrics["blocked_trades_ratio"] <= gate_cfg.max_blocked_trades_ratio
-    ) if endurance is not None else False
-
-    gate_matrix = {
-        "validated_profile_present": profile is not None,
-        "profile_checksum_ok": _entry_checksum_ok(profile) if profile is not None else False,
-        "schema_compatible": strategy_schema.get("ok", False),
-        # Lifecycle: missing evidence is now BLOCKED (not just a warning)
-        "lifecycle_evidence_present": lifecycle is not None,
-        "lifecycle_clean": (
-            int(lifecycle_symbol.get("critical_mismatch_count", 0) or 0) <= gate_cfg.lifecycle_max_critical
-        ) if lifecycle is not None else False,
-        # lifecycle_audit_ok: now REQUIRED for APPROVED_DEMO (not just caution-eligible)
-        "lifecycle_audit_ok": bool((lifecycle or {}).get("audit_ok", False)) if lifecycle is not None else False,
-        "lifecycle_evidence_recent": lifecycle_recent,
-        # Endurance: missing evidence is now BLOCKED (not just a warning)
-        "endurance_present": endurance is not None,
-        "endurance_decision_go": endurance_symbol.get("decision") == "go" if endurance is not None else False,
-        "endurance_cycles_sufficient": (
-            endo_metrics["cycles_completed"] >= gate_cfg.endurance_min_cycles
-        ) if endurance is not None else False,
-        "endurance_min_trades_met": trade_count >= gate_cfg.endurance_min_trades,
-        "critical_alerts_absent": int(alerts.get("critical", 0) or 0) == 0,
-        # Economic floors (new hard gates)
-        "profit_factor_floor_ok": profit_factor_floor_ok,
-        "expectancy_floor_ok": expectancy_floor_ok,
-        # Signal efficiency floors (new hard gates)
-        "no_trade_ratio_ok": no_trade_ratio_ok,
-        "blocked_trades_ratio_ok": blocked_ratio_ok,
-        # Degradation checks (tighter thresholds from gate config)
-        "no_expectancy_degradation_gate_breach": (
-            float(endurance_symbol.get("expectancy_degradation_pct", 0.0) or 0.0)
-            <= gate_cfg.max_expectancy_degradation_pct
-        ) if endurance is not None else False,
-        "no_profit_factor_degradation_gate_breach": (
-            float(endurance_symbol.get("profit_factor_degradation_pct", 0.0) or 0.0)
-            <= gate_cfg.max_profit_factor_degradation_pct
-        ) if endurance is not None else False,
-    }
-
-    # --- Decision logic: conservative, fail-safe ---
-    # Permanently excluded symbols always block first
-    if symbol == "USDJPY":
-        final_decision = "REVERT_TO_BLOCKED"
-        severity = "error"
-        reasons.append("symbol_out_of_scope_for_promotion")
-
-    # Profile integrity checks
-    if not gate_matrix["validated_profile_present"]:
-        final_decision = "REVERT_TO_BLOCKED"
-        severity = "error"
-        reasons.append("validated_profile_missing")
-    if gate_matrix["validated_profile_present"] and not gate_matrix["profile_checksum_ok"]:
-        final_decision = "REVERT_TO_BLOCKED"
-        severity = "error"
-        reasons.append("profile_checksum_incompatible")
-    if not gate_matrix["schema_compatible"]:
-        final_decision = "REVERT_TO_BLOCKED"
-        severity = "error"
-        reasons.append("strategy_profiles_schema_incompatible")
-
-    if final_decision != "REVERT_TO_BLOCKED":
-        # Lifecycle: all conditions block in strict mode; soft mode keeps validated
-        if not gate_matrix["lifecycle_evidence_present"]:
-            if strict:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append("missing_lifecycle_evidence_blocks_promotion")
-            else:
-                reasons.append("missing_lifecycle_validation")
-        else:
-            if not gate_matrix["lifecycle_clean"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append("lifecycle_critical_mismatch")
-            if gate_cfg.require_lifecycle_audit_ok and not gate_matrix["lifecycle_audit_ok"]:
-                # lifecycle audit_ok is now REQUIRED, not just caution-eligible
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append("lifecycle_audit_not_confirmed_blocks_promotion")
-            if not gate_matrix["lifecycle_evidence_recent"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append(
-                    f"lifecycle_evidence_too_old:"
-                    f"{lifecycle_age_hours:.1f}h>max_{gate_cfg.lifecycle_max_age_hours:.0f}h"
-                    if lifecycle_age_hours is not None else "lifecycle_evidence_age_unknown"
-                )
-
-        # Endurance: ALL missing conditions block in strict mode; soft mode keeps validated
-        if not gate_matrix["endurance_present"]:
-            if strict:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append("missing_endurance_evidence_blocks_promotion")
-            else:
-                reasons.append("missing_endurance_validation")
-        else:
-            if not gate_matrix["endurance_decision_go"]:
-                decision_val = endurance_symbol.get("decision", "missing")
-                if strict:
-                    final_decision = "REVERT_TO_BLOCKED"
-                    severity = "error"
-                    reasons.append(f"endurance_decision={decision_val}_blocks_promotion")
-                else:
-                    if final_decision not in ("REVERT_TO_BLOCKED",):
-                        final_decision = "MOVE_TO_CAUTION"
-                        severity = "warning"
-                    reasons.append(f"endurance_decision={decision_val}")
-            if not gate_matrix["endurance_cycles_sufficient"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append(
-                    f"insufficient_endurance_cycles:{endo_metrics['cycles_completed']}<{gate_cfg.endurance_min_cycles}"
-                )
-            if not gate_matrix["endurance_min_trades_met"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append(
-                    f"insufficient_endurance_trades:{trade_count}<{gate_cfg.endurance_min_trades}"
-                )
-            if not gate_matrix["critical_alerts_absent"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                reasons.append("critical_alerts_present_blocks_promotion")
-            if not gate_matrix["profit_factor_floor_ok"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                pf_val = endo_metrics["avg_profit_factor"]
-                reasons.append(
-                    f"profit_factor_below_floor:{pf_val:.3f}<{gate_cfg.min_profit_factor}"
-                    if pf_val is not None else "profit_factor_unavailable"
-                )
-            if not gate_matrix["expectancy_floor_ok"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                ex_val = endo_metrics["avg_expectancy_usd"]
-                reasons.append(
-                    f"expectancy_below_floor:{ex_val:.3f}<{gate_cfg.min_expectancy_usd}"
-                    if ex_val is not None else "expectancy_unavailable"
-                )
-            if not gate_matrix["no_trade_ratio_ok"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                ntr = endo_metrics["no_trade_ratio"]
-                reasons.append(
-                    f"no_trade_ratio_exceeded:{ntr:.3f}>{gate_cfg.max_no_trade_ratio}"
-                    if ntr is not None else "no_trade_ratio_check_failed"
-                )
-            if not gate_matrix["blocked_trades_ratio_ok"]:
-                final_decision = "REVERT_TO_BLOCKED"
-                severity = "error"
-                btr = endo_metrics["blocked_trades_ratio"]
-                reasons.append(
-                    f"blocked_trades_ratio_exceeded:{btr:.3f}>{gate_cfg.max_blocked_trades_ratio}"
-                    if btr is not None else "blocked_trades_ratio_check_failed"
-                )
-            if not gate_matrix["no_expectancy_degradation_gate_breach"]:
-                # Degradation is CAUTION (borderline data quality, not a hard error)
-                if final_decision not in ("REVERT_TO_BLOCKED",):
-                    final_decision = "MOVE_TO_CAUTION"
-                    severity = "warning"
-                reasons.append("expectancy_degradation_above_gate")
-            if not gate_matrix["no_profit_factor_degradation_gate_breach"]:
-                if final_decision not in ("REVERT_TO_BLOCKED",):
-                    final_decision = "MOVE_TO_CAUTION"
-                    severity = "warning"
-                reasons.append("profit_factor_degradation_above_gate")
-
-    if final_decision == "KEEP_VALIDATED" and all(gate_matrix.values()):
-        final_decision = "APPROVED_DEMO"
-        reasons.append("validated_endurance_lifecycle_passed")
+    gate_matrix = _build_promotion_gate_matrix(
+        profile, strategy_schema, lifecycle, lifecycle_symbol, lifecycle_age_hours,
+        endurance, endurance_symbol, alerts, endo_metrics, gate_cfg,
+    )
+    final_decision, severity, reasons = _apply_gate_decisions(
+        symbol, gate_matrix, gate_cfg, lifecycle_age_hours, endurance_symbol, endo_metrics, strict=strict,
+    )
     active_status = resolve_active_profile_entry(settings, symbol, registry=registry)
     return {
         "symbol": symbol,
@@ -328,7 +294,7 @@ def _promotion_review_for_symbol(
             "available": endurance is not None,
             "decision": endurance_symbol.get("decision", "missing") if endurance is not None else "missing",
             "cycles_completed": endo_metrics["cycles_completed"],
-            "trade_count": trade_count,
+            "trade_count": endo_metrics["trade_count"],
             "no_trade_count": endo_metrics["no_trade_count"],
             "blocked_trades": endo_metrics["blocked_trades"],
             "no_trade_ratio": endo_metrics["no_trade_ratio"],
@@ -584,7 +550,7 @@ def materialize_active_profiles(settings: Settings) -> int:
             registry = load_strategy_profile_registry(settings)
             _materialize_active_profiles_from_registry(settings, registry)
     except (RegistryMutationConflictError, RegistryLockTimeoutError) as exc:
-        logger.error("No se pudo materializar active profiles bajo lock: %s", exc)
+        logger.error("Could not materialize active profiles under lock: %s", exc)
         return 5
 
     # Report
@@ -647,7 +613,7 @@ def repair_strategy_profile_registry(settings: Settings) -> int:
             save_strategy_profile_registry(settings, registry)
             _materialize_active_profiles_from_registry(settings, registry)
     except (RegistryMutationConflictError, RegistryLockTimeoutError) as exc:
-        logger.error("No se pudo reparar strategy profile registry bajo lock: %s", exc)
+        logger.error("Could not repair strategy profile registry under lock: %s", exc)
         return 5
 
     report = {

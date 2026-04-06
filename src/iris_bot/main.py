@@ -8,7 +8,7 @@ from iris_bot.cli import (
     run_cli_command,
 )
 from iris_bot.commands.data import build_dataset_command
-from iris_bot.config import settings
+from iris_bot.config import load_settings
 
 
 COMMAND_HANDLERS = build_command_handlers()
@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    settings = load_settings()
     raise SystemExit(
         run_cli_command(
             command=args.command,

@@ -34,6 +34,18 @@ ARTIFACT_SCHEMA_VERSIONS = {
     "active_strategy_materialization": 1,
     "demo_execution_readiness": 1,
     "technical_debt_avoidance": 1,
+    "structural_rework": 1,
+    "structural_model_comparison": 1,
+    "demo_execution_candidate": 1,
+    "model_artifact_manifest": 1,
+    "model_load_validation": 1,
+    "inference_preflight": 1,
+    "demo_broker_execution_preflight": 1,
+    "demo_execution_registry": 1,
+    "demo_execution": 1,
+    "broker_order_trace": 1,
+    "post_trade_reconciliation": 1,
+    "demo_execution_status": 1,
 }
 
 

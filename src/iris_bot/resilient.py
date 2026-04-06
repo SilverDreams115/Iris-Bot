@@ -42,6 +42,34 @@ from iris_bot.resilient_state import (
     restore_runtime_state,
 )
 
+def _blocked_run_artifacts(
+    state: object,
+    restore_report: object,
+    alerts: list[AlertRecord],
+    *,
+    closed_trades: list | None = None,
+    run_report: dict | None = None,
+    validation_issues: list[str],
+    operational_status: dict,
+    reconciliation_report: dict | None = None,
+) -> PaperRunArtifacts:
+    """Factory for early-exit blocked-run artifacts (restore/reconnect/reconcile failures)."""
+    return PaperRunArtifacts(
+        state=state,  # type: ignore[arg-type]
+        events=[],
+        closed_trades=closed_trades if closed_trades is not None else [],
+        daily_summary={},
+        run_report=run_report or {},
+        validation_report={"ok": False, "issues": validation_issues},
+        signal_rows=[],
+        execution_rows=[],
+        restore_state_report=restore_report.to_dict(),  # type: ignore[union-attr]
+        reconciliation_report=reconciliation_report or {},
+        operational_status=operational_status,
+        alerts=alerts,
+    )
+
+
 __all__ = [
     # Public API re-exported from sub-modules for backward compatibility
     "BrokerPositionSnapshot",
@@ -90,19 +118,10 @@ def run_resilient_session(
         emit_alert(alerts, "critical", "persistence_restore_failed", "State restore failed", restore_report.to_dict())
         if settings.recovery.require_state_restore_clean:
             empty_state = fresh_state(settings.backtest.starting_balance_usd, mode)
-            artifacts = PaperRunArtifacts(
-                state=empty_state,
-                events=[],
-                closed_trades=[],
-                daily_summary={},
-                run_report={},
-                validation_report={"ok": False, "issues": restore_report.issues},
-                signal_rows=[],
-                execution_rows=[],
-                restore_state_report=restore_report.to_dict(),
-                reconciliation_report={},
+            artifacts = _blocked_run_artifacts(
+                empty_state, restore_report, alerts,
+                validation_issues=restore_report.issues,
                 operational_status={"status": "blocked"},
-                alerts=alerts,
             )
             write_operational_artifacts(run_dir, artifacts, {"mode": mode})
             return 2, run_dir
@@ -123,19 +142,11 @@ def run_resilient_session(
         if not reconnect_report.ok:
             emit_alert(alerts, "critical", "reconnect_fail", "Unable to reconnect MT5", reconnect_report.to_dict())
             empty_state = restored_state or fresh_state(settings.backtest.starting_balance_usd, mode)
-            artifacts = PaperRunArtifacts(
-                state=empty_state,
-                events=[],
-                closed_trades=[],
-                daily_summary={},
-                run_report={},
-                validation_report={"ok": False, "issues": ["reconnect_failed"]},
-                signal_rows=[],
-                execution_rows=[],
-                restore_state_report=restore_report.to_dict(),
-                reconciliation_report={},
+            artifacts = _blocked_run_artifacts(
+                empty_state, restore_report, alerts,
+                run_report={"reconnect": reconnect_report.to_dict()},
+                validation_issues=["reconnect_failed"],
                 operational_status={"status": "blocked", "reconnect": reconnect_report.to_dict()},
-                alerts=alerts,
             )
             write_operational_artifacts(run_dir, artifacts, {"mode": mode})
             return 2, run_dir
@@ -177,19 +188,13 @@ def run_resilient_session(
         emit_alert(alerts, "critical", "broker_mismatch", "Critical broker/local mismatch", reconciliation.to_dict())
         if reconciliation.action in {"hard_fail", "blocked"}:
             base_state.blocked_reasons.append("critical_reconciliation_mismatch")
-            artifacts = PaperRunArtifacts(
-                state=base_state,
-                events=[],
+            artifacts = _blocked_run_artifacts(
+                base_state, restore_report, alerts,
                 closed_trades=base_state.closed_positions,
-                daily_summary={},
                 run_report={"reconnect": reconnect_report.to_dict()},
-                validation_report={"ok": False, "issues": ["critical_reconciliation_mismatch"]},
-                signal_rows=[],
-                execution_rows=[],
-                restore_state_report=restore_report.to_dict(),
-                reconciliation_report=reconciliation.to_dict(),
+                validation_issues=["critical_reconciliation_mismatch"],
                 operational_status=build_operational_status(base_state, reconciliation, restore_report, alerts),
-                alerts=alerts,
+                reconciliation_report=reconciliation.to_dict(),
             )
             write_operational_artifacts(run_dir, artifacts, {"mode": mode, "experiment_reference": str(reference.run_dir)})
             return 3, run_dir

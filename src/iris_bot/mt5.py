@@ -16,6 +16,7 @@ class OrderRequest:
     stop_loss: float
     take_profit: float
     price: float | None = None
+    deviation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,19 @@ class BrokerSnapshot:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class MT5SessionHealth:
+    ok: bool
+    connected: bool
+    terminal_available: bool
+    account_accessible: bool
+    last_error: object
+    details: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class MT5Client:
     """Client for historical data plus validated demo-order dry runs."""
 
@@ -96,6 +110,7 @@ class MT5Client:
         self.config = config
         self._mt5: Any | None = mt5_module
         self._connected = mt5_module is not None
+        self._last_health: MT5SessionHealth | None = None
 
     def _initialize_kwargs(self, *, authenticated: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -115,11 +130,14 @@ class MT5Client:
                 return False
             self._mt5 = mt5
 
+        self._connected = False
         if self.config.login and self.config.password and self.config.server:
             auth_kwargs = self._initialize_kwargs(authenticated=True)
             if self._mt5.initialize(**auth_kwargs):
                 self._connected = True
-                return True
+                if self.health_check().ok:
+                    return True
+                self.shutdown()
             if hasattr(self._mt5, "shutdown"):
                 self._mt5.shutdown()
             base_kwargs = self._initialize_kwargs(authenticated=False)
@@ -136,13 +154,20 @@ class MT5Client:
             self._connected = logged_in
             if not logged_in:
                 self._mt5.shutdown()
-            return logged_in
+                return False
+            if self.health_check().ok:
+                return True
+            self.shutdown()
+            return False
         kwargs = self._initialize_kwargs(authenticated=False)
         if not self._mt5.initialize(**kwargs):
             self._connected = False
             return False
         self._connected = True
-        return True
+        if self.health_check(require_account=False).ok:
+            return True
+        self.shutdown()
+        return False
 
     def shutdown(self) -> None:
         if self._mt5 is not None:
@@ -155,23 +180,88 @@ class MT5Client:
         return self._mt5.last_error()
 
     def is_connected(self) -> bool:
-        if self._mt5 is None or not self._connected:
+        return self.health_check().ok
+
+    def health_check(self, *, require_account: bool = True) -> MT5SessionHealth:
+        if self._mt5 is None:
+            health = MT5SessionHealth(
+                ok=self._connected,
+                connected=self._connected,
+                terminal_available=self._connected,
+                account_accessible=self._connected,
+                last_error=self.last_error(),
+                details={"reason": "external_client_without_mt5_module"},
+            )
+            self._last_health = health
+            return health
+        if not self._connected:
+            health = MT5SessionHealth(
+                ok=False,
+                connected=False,
+                terminal_available=False,
+                account_accessible=False,
+                last_error=self.last_error(),
+                details={"reason": "not_connected"},
+            )
+            self._last_health = health
+            return health
+
+        terminal_info = None
+        if hasattr(self._mt5, "terminal_info"):
+            terminal_info = self._mt5.terminal_info()
+        terminal_available = terminal_info is not None
+
+        account_info = None
+        account_capability_available = hasattr(self._mt5, "account_info")
+        if require_account and account_capability_available:
+            account_info = self._mt5.account_info()
+        account_accessible = (not require_account) or (not account_capability_available) or account_info is not None
+        health = MT5SessionHealth(
+            ok=terminal_available and account_accessible,
+            connected=True,
+            terminal_available=terminal_available,
+            account_accessible=account_accessible,
+            last_error=self.last_error(),
+            details={
+                "require_account": require_account,
+                "terminal_info_present": terminal_available,
+                "account_capability_available": account_capability_available,
+                "account_info_present": account_info is not None if require_account and account_capability_available else None,
+            },
+        )
+        self._last_health = health
+        if not health.ok:
+            self._connected = False
+        return health
+
+    def ensure_connection(self, *, require_account: bool = True, force_reconnect: bool = False) -> bool:
+        if not force_reconnect:
+            health = self.health_check(require_account=require_account)
+            if health.ok:
+                return True
+        self.shutdown()
+        if not self.connect():
             return False
-        mt5_module = self._mt5
-        info = mt5_module.terminal_info() if mt5_module is not None and hasattr(mt5_module, "terminal_info") else None
-        return bool(info)
+        return self.health_check(require_account=require_account).ok
+
+    def session_health(self) -> MT5SessionHealth | None:
+        return self._last_health
 
     def account_info(self) -> dict[str, Any] | None:
+        if not self.ensure_connection():
+            return None
         if self._mt5 is None or not hasattr(self._mt5, "account_info"):
             return None
         info = self._mt5.account_info()
         if info is None:
+            self._connected = False
             return None
         return info._asdict() if hasattr(info, "_asdict") else dict(info)
 
     def broker_state_snapshot(self, symbols: tuple[str, ...]) -> BrokerSnapshot:
-        if self._mt5 is None or not self._connected:
+        if not self.ensure_connection():
             return BrokerSnapshot(False, {}, [], [], [], {"ownership_filter_active": False, "ignored_positions": 0, "ignored_orders": 0, "ignored_closed_trades": 0})
+        assert self._mt5 is not None
         account_info = self.account_info() or {}
         raw_positions = self._mt5.positions_get() if hasattr(self._mt5, "positions_get") else []
         positions = []
@@ -219,7 +309,7 @@ class MT5Client:
         )
 
     def broker_lifecycle_snapshot(self, symbols: tuple[str, ...], history_days: int) -> dict[str, Any]:
-        if self._mt5 is None or not self._connected:
+        if not self.ensure_connection():
             return {
                 "connected": False,
                 "orders": [],
@@ -227,6 +317,7 @@ class MT5Client:
                 "positions": [],
                 "scope_report": {"ownership_filter_active": False},
             }
+        assert self._mt5 is not None
         start = datetime.now(tz=UTC) - timedelta(days=max(history_days, 1))
         end = datetime.now(tz=UTC)
         raw_positions = self._mt5.positions_get() if hasattr(self._mt5, "positions_get") else []
@@ -273,8 +364,9 @@ class MT5Client:
         }
 
     def fetch_historical_bars(self, symbol: str, timeframe: str, count: int) -> list[Bar]:
-        if self._mt5 is None:
+        if not self.ensure_connection(require_account=False):
             raise RuntimeError("MT5 is not connected")
+        assert self._mt5 is not None
 
         timeframe_code = resolve_mt5_timeframe(self._mt5, timeframe)
         rates = self._mt5.copy_rates_from_pos(symbol, timeframe_code, 0, count)
@@ -283,7 +375,13 @@ class MT5Client:
 
         bars: list[Bar] = []
         for rate in rates:
-            rate_data = rate._asdict() if hasattr(rate, "_asdict") else dict(rate)
+            # MT5 returns numpy structured array rows — convert via dtype field names.
+            if hasattr(rate, "_asdict"):
+                rate_data = rate._asdict()
+            elif hasattr(rate, "dtype"):
+                rate_data = {name: rate[name] for name in rate.dtype.names}
+            else:
+                rate_data = dict(rate)
             bars.append(
                 Bar(
                     timestamp=datetime.fromtimestamp(rate_data["time"], tz=UTC).replace(tzinfo=None),
@@ -302,32 +400,36 @@ class MT5Client:
     def check(self, symbols: tuple[str, ...]) -> MT5ValidationReport:
         issues: list[MT5ValidationIssue] = []
         symbol_reports: dict[str, dict[str, Any]] = {}
-        connected = self._connected and self._mt5 is not None
+        health = self.health_check()
+        connected = health.connected and self._mt5 is not None
         if not connected:
             issues.append(
                 MT5ValidationIssue(
                     scope="connection",
                     code="not_connected",
                     message="MT5 is not connected",
-                    details={},
+                    details={"health": health.to_dict()},
                 )
             )
             return MT5ValidationReport(False, False, False, issues, symbol_reports)
 
-        terminal_initialized = True
-        mt5_module = self._mt5
-        if mt5_module is not None and hasattr(mt5_module, "terminal_info"):
-            info = mt5_module.terminal_info()
-        else:
-            info = None
-        if info is None:
-            terminal_initialized = False
+        terminal_initialized = health.terminal_available
+        if not terminal_initialized:
             issues.append(
                 MT5ValidationIssue(
                     scope="terminal",
                     code="terminal_unavailable",
                     message="No se pudo leer terminal_info()",
-                    details={},
+                    details={"health": health.to_dict()},
+                )
+            )
+        if not health.account_accessible:
+            issues.append(
+                MT5ValidationIssue(
+                    scope="account",
+                    code="account_unavailable",
+                    message="No se pudo leer account_info()",
+                    details={"health": health.to_dict()},
                 )
             )
 
@@ -353,14 +455,15 @@ class MT5Client:
         )
 
     def dry_run_market_order(self, order: OrderRequest) -> DryRunOrderResult:
-        if not self._connected or self._mt5 is None:
+        if not self.ensure_connection():
             issue = MT5ValidationIssue(
                 scope="connection",
                 code="not_connected",
                 message="MT5 is not connected",
-                details={},
+                details={"health": self.session_health().to_dict() if self.session_health() else {}},
             )
             return DryRunOrderResult(False, "not_connected", None, None, [issue])
+        assert self._mt5 is not None
 
         symbol_validation = self._validate_symbol(order.symbol)
         issues = [
@@ -457,8 +560,9 @@ class MT5Client:
 
     def close_position(self, ticket: int, symbol: str, volume: float, side: str) -> OrderResult:
         """Close an open MT5 position by ticket. side is the original position side ('buy'|'sell')."""
-        if not self._connected or self._mt5 is None:
+        if not self.ensure_connection():
             return OrderResult(False, -1, "not_connected", None, None, None, {})
+        assert self._mt5 is not None
         close_side = "sell" if side == "buy" else "buy"
         order_type = self._mt5.ORDER_TYPE_SELL if close_side == "sell" else self._mt5.ORDER_TYPE_BUY
         tick = self._mt5.symbol_info_tick(symbol)
@@ -694,7 +798,7 @@ class MT5Client:
             "price": price,
             "sl": order.stop_loss,
             "tp": order.take_profit,
-            "deviation": 20,
+            "deviation": int(order.deviation or 20),
             "magic": self.config.magic_number,
             "comment": f"{self.config.comment_tag} demo dry-run",
             "type_time": self._mt5.ORDER_TIME_GTC,

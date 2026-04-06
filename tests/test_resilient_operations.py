@@ -168,6 +168,7 @@ def test_reconnect_multiple_failures_then_success() -> None:
     assert report.attempts[0]["ok"] is False
     assert report.attempts[1]["ok"] is False
     assert report.attempts[2]["ok"] is True
+    assert report.attempts[2]["health"]["ok"] is True
 
 
 def test_reconnect_exhausted_retries_with_intermittent_pattern() -> None:
@@ -177,6 +178,7 @@ def test_reconnect_exhausted_retries_with_intermittent_pattern() -> None:
     assert report.ok is False
     assert report.final_state == "blocked"
     assert len(report.attempts) == 4
+    assert all("health" in attempt for attempt in report.attempts)
 
 
 def test_state_restore_success_and_corruption_block(tmp_path: Path) -> None:

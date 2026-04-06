@@ -203,8 +203,17 @@ def reconcile_state(
 def reconnect_mt5(client: MT5Client, recovery: RecoveryConfig) -> ReconnectReport:
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, recovery.reconnect_retries + 1):
-        ok = client.connect()
-        attempts.append({"attempt": attempt, "ok": ok, "timestamp": now_iso(), "last_error": client.last_error()})
+        ok = client.ensure_connection(force_reconnect=True)
+        health = client.session_health()
+        attempts.append(
+            {
+                "attempt": attempt,
+                "ok": ok,
+                "timestamp": now_iso(),
+                "last_error": client.last_error(),
+                "health": health.to_dict() if health is not None else None,
+            }
+        )
         if ok:
             return ReconnectReport(True, "connected", attempts)
         if recovery.reconnect_backoff_seconds > 0:
@@ -266,6 +275,19 @@ def build_live_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
     without sending orders, use build_demo_execution_validator instead.
     """
     def validator(intent: OrderIntent) -> ExecutionDecision:
+        if not client.ensure_connection():
+            return ExecutionDecision(
+                accepted=False,
+                reason="communication_error",
+                details={
+                    "broker_result": {
+                        "accepted": False,
+                        "reason": "not_connected",
+                        "health": client.session_health().to_dict() if client.session_health() is not None else None,
+                    },
+                    "broker_decision": asdict(BrokerEventDecision("communication_error", "retry", True, False, {})),
+                },
+            )
         result = client.send_market_order(
             OrderRequest(
                 symbol=intent.symbol,
@@ -287,6 +309,19 @@ def build_live_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
 
 def build_demo_execution_validator(client: MT5Client) -> Callable[[OrderIntent], ExecutionDecision]:
     def validator(intent: OrderIntent) -> ExecutionDecision:
+        if not client.ensure_connection():
+            return ExecutionDecision(
+                accepted=False,
+                reason="communication_error",
+                details={
+                    "broker_result": {
+                        "accepted": False,
+                        "reason": "not_connected",
+                        "health": client.session_health().to_dict() if client.session_health() is not None else None,
+                    },
+                    "broker_decision": asdict(BrokerEventDecision("communication_error", "retry", True, False, {})),
+                },
+            )
         result = client.dry_run_market_order(
             OrderRequest(
                 symbol=intent.symbol,

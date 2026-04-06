@@ -239,7 +239,7 @@ def rollback_strategy_profile(settings: Settings) -> int:
         logger.error("Concurrent mutation conflict in rollback for %s: %s", symbol, exc)
         return 5
     except RegistryLockTimeoutError as exc:
-        logger.error("Timeout adquiriendo lock del registry para rollback %s: %s", symbol, exc)
+        logger.error("Timeout acquiring registry lock for rollback %s: %s", symbol, exc)
         return 6
 
     report = {

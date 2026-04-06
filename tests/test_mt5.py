@@ -32,6 +32,8 @@ class FakeMT5:
         self.volume_step = volume_step
         self.initialize_calls: list[dict[str, object]] = []
         self.login_calls = 0
+        self.account_available = True
+        self.terminal_available = True
 
     def initialize(self, **_: object) -> bool:
         self.initialize_calls.append(_)
@@ -46,7 +48,14 @@ class FakeMT5:
         self.shutdown_called = True
 
     def terminal_info(self) -> dict[str, object]:
+        if not self.terminal_available:
+            return None  # type: ignore[return-value]
         return {"connected": True}
+
+    def account_info(self):
+        if not self.account_available:
+            return None
+        return namedtuple("AccountInfo", ["balance", "equity", "server"])(1000.0, 1000.0, "MetaQuotes-Demo")
 
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int) -> list[FakeRate]:
         assert symbol == "EURUSD"
@@ -115,6 +124,31 @@ def test_connect_prefers_authenticated_initialize_without_separate_login() -> No
     assert mt5.initialize_calls[0]["password"] == "secret"
     assert mt5.initialize_calls[0]["server"] == "MetaQuotes-Demo"
     assert mt5.login_calls == 0
+
+
+def test_connect_requires_usable_session_health() -> None:
+    mt5 = FakeMT5()
+    mt5.account_available = False
+    client = MT5Client(
+        replace(MT5Config(), enabled=True, login=123456, password="secret", server="MetaQuotes-Demo"),
+        mt5_module=mt5,
+    )
+
+    assert client.connect() is False
+    assert client.session_health() is not None
+    assert client.session_health().account_accessible is False
+
+
+def test_ensure_connection_recovers_from_terminal_drop() -> None:
+    mt5 = FakeMT5()
+    client = MT5Client(replace(MT5Config(), enabled=True), mt5_module=mt5)
+    assert client.connect() is True
+
+    mt5.terminal_available = False
+    assert client.health_check().ok is False
+
+    mt5.terminal_available = True
+    assert client.ensure_connection(force_reconnect=True) is True
 
 
 def test_dry_run_builds_request_when_valid() -> None:

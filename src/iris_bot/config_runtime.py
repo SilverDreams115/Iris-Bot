@@ -8,6 +8,7 @@ from iris_bot.config_types import (
     BacktestConfig,
     ChaosConfig,
     DataConfig,
+    DemoExecutionConfig,
     DynamicExitConfig,
     EnduranceConfig,
     ExitPolicyRuntimeConfig,
@@ -33,6 +34,8 @@ from iris_bot.config_types import (
     XGBoostConfig,
 )
 
+_ENV_SOURCES: dict[str, str] = {}
+
 
 def _load_local_env_file() -> None:
     """Load simple KEY=VALUE pairs from project-root .env if present.
@@ -50,12 +53,22 @@ def _load_local_env_file() -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key or key in os.environ:
+        if not key:
+            continue
+        if key in os.environ:
+            _ENV_SOURCES.setdefault(key, "process_env")
             continue
         parsed = value.strip()
         if len(parsed) >= 2 and parsed[0] == parsed[-1] and parsed[0] in {"'", '"'}:
             parsed = parsed[1:-1]
         os.environ[key] = parsed
+        _ENV_SOURCES[key] = ".env"
+
+
+def env_source(name: str) -> str:
+    if name in os.environ:
+        return _ENV_SOURCES.get(name, "process_env")
+    return "default"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -373,6 +386,18 @@ def _load_backtest_config() -> BacktestConfig:
     )
 
 
+def _load_demo_execution_config() -> DemoExecutionConfig:
+    return DemoExecutionConfig(
+        enabled=_env_bool("IRIS_DEMO_EXECUTION_ENABLED", False),
+        target_symbol=_env_str("IRIS_DEMO_EXECUTION_TARGET_SYMBOL", ""),
+        max_orders_per_run=_env_int("IRIS_DEMO_EXECUTION_MAX_ORDERS_PER_RUN", 1) or 1,
+        auto_close_after_entry=_env_bool("IRIS_DEMO_EXECUTION_AUTO_CLOSE_AFTER_ENTRY", True),
+        require_explicit_activation=_env_bool("IRIS_DEMO_EXECUTION_REQUIRE_EXPLICIT_ACTIVATION", True),
+        deviation_points=_env_int("IRIS_DEMO_EXECUTION_DEVIATION_POINTS", 20) or 20,
+        registry_filename=_env_str("IRIS_DEMO_EXECUTION_REGISTRY_FILENAME", "demo_execution_registry.json"),
+    )
+
+
 def load_settings() -> Settings:
     _load_local_env_file()
     project_root = Path(__file__).resolve().parents[2]
@@ -406,6 +431,7 @@ def load_settings() -> Settings:
         significance=_load_significance_config(),
         experiment=_load_experiment_config(data_root),
         backtest=_load_backtest_config(),
+        demo_execution=_load_demo_execution_config(),
     )
 
 

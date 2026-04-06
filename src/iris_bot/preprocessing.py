@@ -37,7 +37,7 @@ class ManualStandardScaler:
 
     def transform(self, rows: list[list[float]]) -> list[list[float]]:
         if self.means is None or self.stds is None:
-            raise RuntimeError("El scaler debe entrenarse antes de transformar")
+            raise RuntimeError("Scaler must be fitted before transform")
         transformed: list[list[float]] = []
         for row in rows:
             transformed.append(

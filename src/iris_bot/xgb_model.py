@@ -90,8 +90,6 @@ class XGBoostMultiClassModel:
     def _resolved_calibration_method(self, best_method: str) -> str:
         configured = self.config.probability_calibration_method
         if configured == "auto":
-            if best_method == "uncalibrated":
-                return "global_temperature"
             return best_method
         if configured == "classwise_temperature":
             return "classwise_temperature"
@@ -197,6 +195,8 @@ class XGBoostMultiClassModel:
         if self.calibration_method == "classwise_temperature":
             self.calibration_class_temperatures = class_temperatures
             calibrated = classwise_calibrated
+        elif self.calibration_method == "uncalibrated":
+            calibrated = validation_probabilities
         else:
             self.calibration_method = "global_temperature"
             self.calibration_temperature = global_temperature
@@ -234,6 +234,7 @@ class XGBoostMultiClassModel:
         validation_rows: list[list[float]],
         validation_labels: list[int],
         feature_names: list[str] | None = None,
+        sample_weights: list[float] | None = None,
     ) -> None:
         try:
             import xgboost as xgb
@@ -250,7 +251,10 @@ class XGBoostMultiClassModel:
         mapped_train = [LABEL_TO_CLASS[label] for label in train_labels]
         mapped_valid = [LABEL_TO_CLASS[label] for label in validation_labels]
         self.class_weights = self._compute_class_weights(train_labels)
-        train_weights = [self.class_weights.get(label, 1.0) for label in train_labels]
+        train_weights = [
+            self.class_weights.get(label, 1.0) * (sample_weights[i] if sample_weights else 1.0)
+            for i, label in enumerate(train_labels)
+        ]
 
         dtrain = xgb.DMatrix(train_rows, label=mapped_train, feature_names=feature_names, weight=train_weights)
         dvalid = xgb.DMatrix(validation_rows, label=mapped_valid, feature_names=feature_names)

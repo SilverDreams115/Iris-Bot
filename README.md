@@ -1,22 +1,154 @@
 # IRIS-Bot
 
-IRIS-Bot es un framework de investigacion y operacion controlada para trading FX con MetaTrader 5. El repositorio ya cubre adquisicion de datos, construccion de datasets, entrenamiento y evaluacion economica de modelos, paper trading, demo dry-run, governance por perfil de estrategia, reconciliacion operativa y pruebas de resistencia. No es, en su estado actual, un bot de live trading para capital real.
+IRIS-Bot is a research and controlled-execution framework for FX trading with MetaTrader 5.  It covers the full pipeline from raw MT5 history to statistical validation, paper trading, demo dry-run, and a governance lifecycle that gates each strategy profile through evidence-backed promotions before it can ever touch real capital.
 
-Este README describe el estado real del proyecto tal como existe hoy en el codigo y en los artefactos de validacion del repositorio. No documenta features aspiracionales.
+This README describes what actually exists in the code and validated artifacts today.  It makes no aspirational claims.
 
-## Estado real del proyecto
+---
 
-- El proyecto funciona hoy como framework de research y validacion operativa para FX sobre MT5.
-- El flujo normal soportado es: historico MT5 -> dataset procesado -> experimento/backtest -> walk-forward -> paper o demo dry-run -> governance/readiness.
-- Existe una prueba separada de ejecucion real en cuenta demo: `run-demo-live-probe`. Esa prueba abre una orden real minima, la audita y la cierra.
-- No existe un flujo general de live trading sobre cuenta real documentado ni validado en este repositorio.
-- El gate `demo_execution_readiness` sigue siendo deliberadamente conservador y no declara el sistema como listo para live. El `demo_live_checklist` es un chequeo distinto para la prueba demo-live separada.
+## What this project is
 
-## Lo que el repositorio si puede hacer
+- A **research framework**: fetch MT5 history → build a processed dataset → train XGBoost → walk-forward economic backtest → permutation significance testing.
+- A **controlled-execution harness**: paper trading, demo dry-run, and a single validated demo-live probe (open + close a real order on a demo account).
+- A **governance engine**: strategy profiles move through `validated → approved_demo → active` via evidence gates, checksums, atomic writes, and registry locking.
+- **Not** a general-purpose live-trading bot for real capital in its current state.
 
-### 1. Datos y dataset
+---
 
-Comandos disponibles:
+## ML pipeline
+
+### Features — 32 inputs (M15, OHLCV)
+
+All features are computed without look-ahead.  The processed dataset is built by `processed_dataset.py` and validated against a schema manifest on load.
+
+**Returns and momentum** (cross-pair comparable, normalized fractional returns)
+- `return_1`, `return_3`, `return_5` — bar-close fractional returns over 1/3/5 bars
+- `log_return_1` — log return for the last bar
+- `momentum_3` — `(close - close_3) / close_3` (normalized, not raw price diff)
+- `momentum_5` — `(close - close_5) / close_5` (normalized)
+
+**Volatility**
+- `rolling_volatility_5`, `rolling_volatility_10` — rolling std of returns
+- `atr_5`, `atr_10` — Average True Range over 5 / 10 bars
+- `parkinson_volatility_10` — Parkinson estimator using high/low (more efficient than close-to-close for intrabar volatility)
+
+**Candle structure**
+- `range_ratio` — `(high - low) / close`
+- `body_ratio` — `|open - close| / (high - low + ε)`
+- `upper_wick_ratio`, `lower_wick_ratio` — wick fractions of total range
+
+**Trend and mean-reversion**
+- `distance_to_sma_5`, `distance_to_sma_10` — normalized distance from close to SMA
+- `efficiency_ratio_10` — Kaufman ER over 10 bars (net move / path length)
+- `efficiency_ratio_50` — Kaufman ER over up to 50 bars (regime-scale trend strength)
+- `return_autocorr_10`, `return_autocorr_3`, `return_autocorr_5` — Pearson autocorrelation of returns at lag 1, 3, 5 (positive = momentum, negative = mean-reversion)
+- `variance_ratio_hurst_proxy` — VR(5) over up to 50 bars; VR > 1 trending, VR < 1 mean-reverting (Hurst proxy)
+
+**Volume**
+- `volume_zscore_20` — volume z-score vs. 20-bar rolling mean/std (wider context than 5-bar; detects institutional flow)
+- `volume_percentile_20` — volume percentile within last 20 bars
+
+**Regime**
+- `atr_regime_percentile` — ATR₁₀ percentile within last 50 bars (0 = compressed, 1 = expansion)
+
+**Session**
+- `session_asia`, `session_london`, `session_new_york` — binary flags (M15 UTC hour bands)
+
+**Cross-symbol / CurrencyStrengthMatrix** (new)
+- `cross_momentum_agreement` — fraction of correlated pairs moving in the expected direction (0.5 = neutral/single-symbol)
+- `usd_strength_index` — DXY proxy computed from EURUSD / GBPUSD / AUDUSD / USDJPY returns with directional weights
+- `currency_strength_rank` — relative rank of this symbol's currency vs. cross-pair universe (0.5 = neutral/single-symbol)
+
+When only one symbol is present (e.g., in tests), cross-symbol features default to neutral values (`0.0`, `0.0`, `0.5`).
+
+### Model
+
+- **Algorithm**: XGBoost native (no sklearn wrapper), multiclass softprob
+- **Labels**: -1 (Short) / 0 (Neutral) / 1 (Long)
+- **Labeling strategies**: triple barrier (configurable barrier width, hold period, `allow_no_trade`) and next-bar-direction
+- **Class weights**: frequency-inverse weighting with configurable cap, combined multiplicatively with economic sample weights
+- **Economic sample weights**: per-bar weights proportional to `atr_5` relative to the training-set median ATR (capped at 3×). Bars with larger potential moves are weighted more — the model prioritizes getting high-stakes bars right.
+- **Probability calibration** (auto-selects best on validation log-loss):
+  - `uncalibrated` — raw softmax probabilities
+  - `global_temperature` — single temperature scale applied to all classes
+  - `classwise_temperature` — per-class temperature calibration
+  - `auto` (default) — evaluates all three, applies the winner (including `uncalibrated` if it genuinely wins)
+- **Feature importance**: gain-based, reported in experiment artifacts
+
+### Threshold selection
+
+- Grid search over configurable probability thresholds; optional fine-grained refinement around the coarse best
+- Objective metrics: `macro_f1`, `balanced_accuracy`, `accuracy`, `directional_precision`
+- **`directional_precision`**: fraction of non-neutral predictions that are correct — the economically meaningful metric because wrong directional calls lose money, missed opportunities (neutral) do not
+
+### Baseline
+
+`WeightedMomentumBaseline` — weighted combination of `return_1` (50%), `momentum_3` (30%), `momentum_5` (20%).  All inputs are normalized fractional returns, making the score cross-pair comparable and a more meaningful directional signal than a single raw momentum value.
+
+### Statistical significance
+
+- Permutation testing over walk-forward windows (labels shuffled, full economic replay repeated per trial)
+- Deflated Sharpe Ratio (accounts for multiple-testing bias)
+- Reported in `experiment_report.json`: p-value, null distribution percentile, per-trial results CSV
+
+---
+
+## Pipeline overview
+
+```
+MT5 history
+    └── fetch / fetch-historical
+          └── validate-data
+                └── build-dataset  (processed_dataset.py, schema + manifest)
+                      └── run-experiment  (train XGBoost, calibrate, threshold, significance)
+                            └── run-backtest [--walk-forward]  (economic P&L replay)
+                                  └── run-paper / run-demo-dry  (paper or dry-run on MT5)
+                                        └── governance lifecycle
+                                              (validated → approved_demo → active)
+```
+
+---
+
+## Governance lifecycle
+
+Each strategy profile (symbol + hyperparameters + thresholds) follows a state machine enforced by the registry:
+
+| State | Meaning |
+|---|---|
+| `validated` | Profile registered; backtest evidence acceptable |
+| `approved_demo` | Passed endurance + lifecycle gates; demo audit checked |
+| `active` | In-use by the paper/demo engine for this symbol |
+| `caution` | Borderline gates; still in use but flagged |
+| `blocked` | Failed gates; removed from active |
+| `deprecated` | Superseded by a newer profile or manual rollback |
+
+**Gate matrix** (promotion review):
+- Endurance gates: `min_sharpe`, `max_drawdown`, `min_win_rate`, `min_trade_count`
+- Lifecycle gates: `min_age_hours`, `sufficient_evidence`
+- Demo audit gate: broker fills vs. internal fills reconciliation; P&L and slippage tolerance check
+
+**Registry integrity**: atomic JSON writes, file-level exclusive lock with stale-lock detection, ETag-based mutation conflict detection, SHA-256 checksums per profile payload.
+
+---
+
+## Demo execution validation
+
+`run-demo-live-probe` performs a real, isolated validation:
+1. Confirms the connected account is a demo account
+2. Opens a minimal real order on the first configured symbol
+3. Locates the open position
+4. Closes it
+5. Writes an auditable report to `runs/*_demo_live_probe/demo_live_probe_report.json`
+
+This probe was validated on a `MetaQuotes-Demo` account (EURUSD, no residual positions).
+
+**This is not** the normal paper/dry-run pipeline, and it does not make the system a general-purpose live-trading bot.
+
+---
+
+## Commands reference
+
+### Data
 
 ```bash
 python -m iris_bot.main fetch
@@ -26,37 +158,12 @@ python -m iris_bot.main build-dataset
 python -m iris_bot.main inspect-dataset
 ```
 
-Capacidades reales:
-
-- descarga historico desde MT5
-- valida integridad basica de los datos descargados
-- construye dataset procesado con schema y manifest
-- inspecciona el dataset procesado para uso de research y backtesting
-
-### 2. Entrenamiento, backtest y research
-
-Comandos disponibles:
+### Research and training
 
 ```bash
 python -m iris_bot.main run-experiment
 python -m iris_bot.main run-backtest
 python -m iris_bot.main run-backtest --walk-forward
-python -m iris_bot.main backtest
-```
-
-Capacidades reales:
-
-- entrenamiento del modelo principal con XGBoost
-- evaluacion economica sobre test split
-- walk-forward economico fold por fold
-- politica intrabar configurable (`conservative` u `optimistic`)
-- perfiles por simbolo y filtrado de filas permitidas por perfil
-- comparacion de modelos por simbolo y validacion por estrategia
-- evaluacion de salidas dinamicas
-
-Comandos de research por simbolo y governance cuantitativa:
-
-```bash
 python -m iris_bot.main build-symbol-profiles
 python -m iris_bot.main run-symbol-research
 python -m iris_bot.main run-strategy-validation
@@ -66,22 +173,7 @@ python -m iris_bot.main evaluate-dynamic-exits
 python -m iris_bot.main symbol-go-no-go
 ```
 
-### 3. Significancia estadistica
-
-El pipeline de experimentos ya integra permutation testing y Deflated Sharpe Ratio.
-
-Estado real:
-
-- existe permutation testing sobre labels permutadas para el flujo walk-forward
-- el reporte de experimento incluye `p_value`, percentil dentro de la distribucion nula y resumen por trial
-- existe calculo de `deflated_sharpe_ratio`
-- el evaluador reutiliza el replay economico walk-forward existente en lugar de inventar otro scorer
-
-Esto vive en el pipeline de experimentos; no es un script aislado fuera del flujo principal.
-
-### 4. Paper trading y demo dry-run
-
-Comandos disponibles:
+### Paper trading and demo dry-run
 
 ```bash
 python -m iris_bot.main run-paper
@@ -94,22 +186,7 @@ python -m iris_bot.main reconcile-state
 python -m iris_bot.main restore-state-check
 ```
 
-Capacidades reales:
-
-- paper trading con estado operativo persistible
-- demo dry-run que valida requests contra MT5 sin enviar ordenes reales como flujo normal
-- reconciliacion broker <-> estado interno
-- chequeo de restauracion y estado operativo
-- sesion resiliente con persistencia y recuperacion controlada
-
-Importante:
-
-- el flujo operativo normal del bot sigue tratando la ejecucion real como fase separada
-- el modulo de readiness `demo_execution_readiness` sigue declarando `order_send_integrated = false` para ese pipeline normal
-
-### 5. Governance, promotion y evidencia
-
-Comandos disponibles:
+### Governance
 
 ```bash
 python -m iris_bot.main list-strategy-profiles
@@ -132,18 +209,7 @@ python -m iris_bot.main active-portfolio-status
 python -m iris_bot.main demo-execution-readiness
 ```
 
-Capacidades reales:
-
-- registro de perfiles de estrategia por simbolo
-- promotion/rollback de perfiles
-- materializacion de perfiles activos
-- auditoria de locks y checksums del registry
-- evidencia de lifecycle y status del evidence store
-- gates para approved-demo y separacion explicita del portfolio activo
-
-### 6. Soak, endurance y chaos
-
-Comandos disponibles:
+### Soak, endurance, chaos
 
 ```bash
 python -m iris_bot.main run-paper-soak
@@ -156,52 +222,25 @@ python -m iris_bot.main run-chaos-scenario
 python -m iris_bot.main go-no-go-report
 ```
 
-Capacidades reales:
-
-- pruebas multi-ciclo de estabilidad operacional
-- pruebas por simbolo y por universo habilitado
-- reporting de estabilidad y decision go/caution/no-go
-- escenarios de chaos controlado
-
-## Ejecucion real en cuenta demo: que existe y que no existe
-
-### Lo que si existe
-
-Comandos disponibles:
+### Demo live probe
 
 ```bash
 python -m iris_bot.main run-demo-live-checklist
 python -m iris_bot.main run-demo-live-probe
 ```
 
-`run-demo-live-probe` hace una validacion real y separada:
+---
 
-- confirma que la cuenta conectada sea demo
-- toma el primer simbolo configurado
-- envia una orden real minima al broker demo
-- localiza la posicion abierta
-- envia la orden de cierre
-- escribe un reporte auditable en `runs/*_demo_live_probe/demo_live_probe_report.json`
+## Environment
 
-Este flujo ya fue validado en una cuenta `MetaQuotes-Demo` durante el trabajo actual del repositorio. El probe abrio y cerro una posicion real de `EURUSD` sin dejar posiciones remanentes.
-
-### Lo que no debe confundirse con eso
-
-- `run-demo-live-probe` no convierte al sistema en un bot live de proposito general
-- `demo_execution_readiness` no afirma que el pipeline normal ya enrute ordenes reales
-- la ejecucion real validada hasta ahora es una prueba controlada de apertura/cierre sobre cuenta demo, no una fase de operacion automatica continua sobre cuenta real
-
-## Requisitos de entorno reales
-
-### Python y entorno local
-
-Bootstrap recomendado:
+### Setup
 
 ```bash
-make bootstrap
+make bootstrap          # creates .venv and installs all dependencies
+make test               # runs the full test suite
 ```
 
-Uso manual:
+Manual:
 
 ```bash
 ./.venv/bin/python -m pip install -e ".[dev]"
@@ -211,66 +250,42 @@ Uso manual:
 
 ### MetaTrader 5
 
-Realidad actual del adaptador MT5:
+- The `MetaTrader5` package is a Windows-only dependency.
+- Research, backtesting, governance, and most tests run on Linux/WSL without MT5.
+- Live MT5 connectivity and the demo-live probe require Python on Windows.
+- The project auto-loads a `.env` file if present.
 
-- el paquete `MetaTrader5` esta declarado como dependencia solo en Windows
-- las operaciones que dependen de `MetaTrader5` no son portables a Linux/WSL de la misma manera
-- el trabajo de research, tests y mucha logica del proyecto puede correrse desde Linux/WSL
-- la conexion real a MT5 y la prueba de orden demo se validaron desde Python de Windows
+---
 
-Variables de entorno soportadas por el proyecto incluyen las de MT5 y otras de configuracion. El repositorio ya carga automaticamente un archivo `.env` si existe.
+## Key modules
 
-## Limitaciones reales actuales
+| Area | Modules |
+|---|---|
+| Data & features | `data.py`, `processed_dataset.py`, `labels.py`, `preprocessing.py` |
+| ML | `xgb_model.py`, `baselines.py`, `thresholds.py`, `metrics.py` |
+| Experiment & backtest | `experiments.py`, `wf_backtest.py`, `backtest.py`, `significance.py` |
+| Paper & demo | `paper.py`, `resilient.py`, `operational.py`, `mt5.py` |
+| Governance | `governance.py`, `governance_promotion.py`, `governance_active.py`, `governance_validation.py` |
+| Registry | `profile_registry.py`, `registry_lock.py`, `profile_evidence.py`, `lifecycle.py` |
+| Demo live | `demo_readiness.py`, `demo_live_checklist.py`, `demo_live_probe.py` |
 
-Estas limitaciones existen hoy en el codigo o en el estado operativo validado:
+---
 
-- no hay soporte documentado y validado para live trading en cuenta real
-- la prueba demo-live existe, pero esta separada del pipeline normal del bot
-- la compatibilidad completa con MT5 depende de Python de Windows por la libreria `MetaTrader5`
-- el gate `demo_execution_readiness` sigue siendo conservador y puede devolver `caution` aunque el `demo_live_checklist` para el probe separado pase
-- el repositorio contiene bastante infraestructura de governance y operacion, pero eso no implica por si solo edge estadistico ni rentabilidad
+## Known limitations
 
-## Cosas que este README no afirma porque hoy no estan demostradas aqui
+- No documented or validated live-trading flow for real capital.
+- The demo-live probe is isolated from the normal paper/dry-run pipeline.
+- Full MT5 connectivity requires Windows Python (`MetaTrader5` library).
+- `demo_execution_readiness` remains conservative by design and may return `caution` even when the separate demo-live checklist passes.
+- Statistical edge and profitability are not guaranteed by the infrastructure.
 
-- no afirma rentabilidad futura
-- no afirma alpha real
-- no afirma readiness para capital real
-- no afirma que todas las rutas operativas esten igualmente validadas en Windows y Linux
-- no afirma que exista un economic calendar gate integrado en el flujo principal
-- no afirma meta-labeling en produccion
-- no afirma trailing stop como politica operativa ya integrada en el flujo principal
+---
 
-## Estructura practica del proyecto
+## What this README does not claim
 
-Modulos relevantes hoy:
-
-- `src/iris_bot/data.py`, `processed_dataset.py`, `labels.py`, `preprocessing.py`
-- `src/iris_bot/xgb_model.py`, `experiments.py`, `wf_backtest.py`, `significance.py`
-- `src/iris_bot/paper.py`, `resilient.py`, `operational.py`, `mt5.py`
-- `src/iris_bot/governance.py`, `profile_registry.py`, `profile_evidence.py`, `lifecycle.py`
-- `src/iris_bot/demo_readiness.py`, `demo_live_checklist.py`, `demo_live_probe.py`
-
-## Comandos mas utiles para empezar
-
-```bash
-python -m iris_bot.main fetch
-python -m iris_bot.main build-dataset
-python -m iris_bot.main run-experiment
-python -m iris_bot.main run-backtest --walk-forward
-python -m iris_bot.main run-paper
-python -m iris_bot.main run-demo-dry
-python -m iris_bot.main mt5-check
-python -m iris_bot.main demo-execution-readiness
-python -m iris_bot.main run-demo-live-checklist
-python -m iris_bot.main run-demo-live-probe
-```
-
-## Validacion conocida en este estado del repositorio
-
-Validaciones reales ya ejecutadas sobre este estado de trabajo:
-
-- la suite de tests del repositorio pasa completa
-- el probe demo-live abrio y cerro una orden real en cuenta demo
-- el checklist demo-live para ese flujo separado ya corre
-
-Lo correcto es seguir tratando el proyecto como un framework serio de research y validacion operativa, no como un sistema ya listo para operar capital real sin mas trabajo.
+- Future profitability or real alpha
+- Readiness for real-capital deployment
+- Uniform validation across Windows and Linux for all execution paths
+- An integrated economic-calendar gate in the main pipeline
+- Meta-labeling in production
+- Trailing stop as an integrated operational policy

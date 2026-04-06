@@ -305,6 +305,17 @@ class BacktestConfig:
 
 
 @dataclass(frozen=True)
+class DemoExecutionConfig:
+    enabled: bool = False
+    target_symbol: str = ""
+    max_orders_per_run: int = 1
+    auto_close_after_entry: bool = True
+    require_explicit_activation: bool = True
+    deviation_points: int = 20
+    registry_filename: str = "demo_execution_registry.json"
+
+
+@dataclass(frozen=True)
 class Settings:
     project_root: Path = Path(__file__).resolve().parents[2]
     data_dir: Path = project_root / "data"
@@ -337,3 +348,4 @@ class Settings:
     significance: SignificanceConfig = field(default_factory=SignificanceConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    demo_execution: DemoExecutionConfig = field(default_factory=DemoExecutionConfig)

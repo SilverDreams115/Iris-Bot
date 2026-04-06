@@ -144,6 +144,17 @@ class TradeSummaryBucket(TypedDict):
     win_rate: float
 
 
+@dataclass
+class _BacktestEngineState:
+    balance: float
+    positions: dict[str, SimulatedPosition]
+    trades: list[TradeRecord]
+    equity_curve: list[EquityPoint]
+    daily_realized: dict[str, float]
+    cooldown_until_index: dict[str, int]
+    blocked_entry_count: int = 0
+
+
 def summarize_trades_by_symbol(trades: list[TradeRecord]) -> dict[str, TradeSummaryBucket]:
     summary: dict[str, TradeSummaryBucket] = {}
     for trade in trades:
@@ -170,6 +181,201 @@ def summarize_trades_by_symbol(trades: list[TradeRecord]) -> dict[str, TradeSumm
         n = bucket["total_trades"]
         bucket["win_rate"] = 0.0 if n == 0 else bucket["wins"] / n
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Engine helpers (private)
+# ---------------------------------------------------------------------------
+
+def _make_trade_record(
+    position: SimulatedPosition,
+    row_timestamp: str,
+    exit_price: float,
+    gross_pnl: float,
+    commission_exit: float,
+    spread_cost_usd: float,
+    slippage_cost_usd: float,
+    net_pnl: float,
+    exit_reason: str,
+    is_ambiguous: bool = False,
+) -> TradeRecord:
+    return TradeRecord(
+        symbol=position.symbol,
+        timeframe=position.timeframe,
+        direction=position.direction,
+        entry_timestamp=position.entry_timestamp.isoformat(),
+        exit_timestamp=row_timestamp,
+        signal_timestamp=position.signal_timestamp.isoformat(),
+        entry_price=position.entry_price,
+        exit_price=exit_price,
+        stop_loss_price=position.stop_loss_price,
+        take_profit_price=position.take_profit_price,
+        volume_lots=position.volume_lots,
+        gross_pnl_usd=gross_pnl,
+        net_pnl_usd=net_pnl,
+        total_commission_usd=position.commission_entry_usd + commission_exit,
+        spread_cost_usd=spread_cost_usd,
+        slippage_cost_usd=slippage_cost_usd,
+        exit_reason=exit_reason,
+        bars_held=position.bars_held,
+        probability_long=position.signal_probability_long,
+        probability_short=position.signal_probability_short,
+        stop_policy=position.stop_policy,
+        target_policy=position.target_policy,
+        stop_policy_details=position.stop_policy_details,
+        target_policy_details=position.target_policy_details,
+        is_intrabar_ambiguous=is_ambiguous,
+    )
+
+
+def _try_enter_position(
+    state: _BacktestEngineState,
+    row: ProcessedRow,
+    series: list[ProcessedRow],
+    series_index: int,
+    pending_signal: PendingSignal,
+    instruments: dict,
+    backtest: object,
+    risk: object,
+    stop_policy: object,
+    target_policy: object,
+    dynamic_exit_config: object,
+    symbol_exit_profiles: dict,
+    aux_rates: dict[str, float] | None,
+) -> None:
+    """Attempt to open a position for the pending signal. Mutates state in-place."""
+    current_day = row.timestamp.date().isoformat()
+    can_open = (
+        len(state.positions) < risk.max_open_positions  # type: ignore[union-attr]
+        and state.daily_realized.get(current_day, 0.0) > -risk.max_daily_loss_usd  # type: ignore[union-attr]
+        and state.cooldown_until_index.get(row.symbol, -1) < series_index
+    )
+    direction_ok = (pending_signal.direction == 1 and backtest.allow_long) or (  # type: ignore[union-attr]
+        pending_signal.direction == -1 and backtest.allow_short  # type: ignore[union-attr]
+    )
+    if not (can_open and direction_ok):
+        return
+
+    instrument = instruments[row.symbol]
+    entry_price = _entry_execution_price(row.open, pending_signal.direction, instrument, backtest)
+    symbol_profile = symbol_exit_profiles.get(row.symbol)
+    stop_level = stop_policy.stop_loss_price(  # type: ignore[union-attr]
+        row=row, entry_price=entry_price, direction=pending_signal.direction,
+        backtest=backtest, risk=risk, dynamic_config=dynamic_exit_config, symbol_profile=symbol_profile,
+    )
+    target_level = target_policy.take_profit_price(  # type: ignore[union-attr]
+        row=row, entry_price=entry_price, direction=pending_signal.direction,
+        backtest=backtest, risk=risk, dynamic_config=dynamic_exit_config, symbol_profile=symbol_profile,
+    )
+    volume_lots = calculate_position_size(
+        balance=state.balance,
+        risk_per_trade=risk.risk_per_trade,  # type: ignore[union-attr]
+        entry_price=entry_price,
+        stop_loss_price=stop_level.price,
+        instrument=instrument,
+        aux_rates=aux_rates,
+    )
+    if volume_lots > 0.0:
+        state.positions[row.symbol] = SimulatedPosition(
+            symbol=row.symbol, timeframe=row.timeframe,
+            direction=pending_signal.direction, volume_lots=volume_lots,
+            entry_timestamp=row.timestamp, entry_index=series_index,
+            signal_timestamp=pending_signal.generated_at,
+            signal_probability_long=pending_signal.probability_long,
+            signal_probability_short=pending_signal.probability_short,
+            entry_price=entry_price,
+            stop_loss_price=stop_level.price, take_profit_price=target_level.price,
+            stop_policy=stop_policy.name, target_policy=target_policy.name,  # type: ignore[union-attr]
+            stop_policy_details=stop_level.details, target_policy_details=target_level.details,
+            commission_entry_usd=_commission_usd(volume_lots, backtest),
+        )
+    else:
+        state.blocked_entry_count += 1
+
+
+def _try_close_position(
+    state: _BacktestEngineState,
+    row: ProcessedRow,
+    series: list[ProcessedRow],
+    series_index: int,
+    instruments: dict,
+    backtest: object,
+    risk: object,
+    intrabar_policy: str,
+    aux_rates: dict[str, float] | None,
+) -> bool:
+    """Attempt to close the open position for row.symbol. Mutates state. Returns True if exited."""
+    active = state.positions.get(row.symbol)
+    if active is None:
+        return False
+
+    instrument = instruments[row.symbol]
+    raw_exit_price, exit_reason, is_ambiguous = _resolve_intrabar_exit(
+        direction=active.direction,
+        bar_low=row.low, bar_high=row.high,
+        stop_loss_price=active.stop_loss_price, take_profit_price=active.take_profit_price,
+        policy=intrabar_policy,
+    )
+
+    if exit_reason is None:
+        active.bars_held += 1
+        if active.bars_held >= backtest.max_holding_bars:  # type: ignore[union-attr]
+            raw_exit_price = row.close
+            exit_reason = "time_exit"
+            is_ambiguous = False
+    else:
+        active.bars_held += 1
+
+    if exit_reason is None or raw_exit_price is None:
+        return False
+
+    current_day = row.timestamp.date().isoformat()
+    exit_price = _exit_execution_price(raw_exit_price, active.direction, instrument, backtest)
+    gross_pnl = realized_pnl_usd(instrument, active.entry_price, exit_price, active.direction, active.volume_lots, aux_rates)
+    commission_exit = _commission_usd(active.volume_lots, backtest)
+    entry_raw_price = series[active.entry_index].open
+    spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
+        instrument, entry_raw_price, raw_exit_price, active.direction, active.volume_lots, backtest, aux_rates,
+    )
+    net_pnl = gross_pnl - active.commission_entry_usd - commission_exit
+    state.balance += net_pnl
+    state.daily_realized[current_day] = state.daily_realized.get(current_day, 0.0) + net_pnl
+    if net_pnl < 0.0 and risk.cooldown_bars_after_loss > 0:  # type: ignore[union-attr]
+        state.cooldown_until_index[row.symbol] = series_index + risk.cooldown_bars_after_loss  # type: ignore[union-attr]
+    state.trades.append(_make_trade_record(
+        active, row.timestamp.isoformat(), exit_price, gross_pnl,
+        commission_exit, spread_cost_usd, slippage_cost_usd, net_pnl, exit_reason, is_ambiguous,
+    ))
+    state.positions.pop(row.symbol, None)
+    return True
+
+
+def _close_remaining_positions(
+    state: _BacktestEngineState,
+    rows_by_symbol: dict[str, list[ProcessedRow]],
+    instruments: dict,
+    backtest: object,
+    aux_rates: dict[str, float] | None,
+) -> None:
+    """Close all open positions at end-of-data using each symbol's last bar."""
+    for symbol, position in list(state.positions.items()):
+        series = rows_by_symbol[symbol]
+        last_row = series[-1]
+        instrument = instruments[symbol]
+        exit_price = _exit_execution_price(last_row.close, position.direction, instrument, backtest)
+        gross_pnl = realized_pnl_usd(instrument, position.entry_price, exit_price, position.direction, position.volume_lots, aux_rates)
+        commission_exit = _commission_usd(position.volume_lots, backtest)
+        entry_raw_price = series[position.entry_index].open
+        spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
+            instrument, entry_raw_price, last_row.close, position.direction, position.volume_lots, backtest, aux_rates,
+        )
+        net_pnl = gross_pnl - position.commission_entry_usd - commission_exit
+        state.balance += net_pnl
+        state.trades.append(_make_trade_record(
+            position, last_row.timestamp.isoformat(), exit_price, gross_pnl,
+            commission_exit, spread_cost_usd, slippage_cost_usd, net_pnl, "end_of_data",
+        ))
+        state.positions.pop(symbol, None)
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +442,15 @@ def run_backtest_engine(
         exit_policy_config.stop_policy,
         exit_policy_config.target_policy,
     )
-    positions: dict[str, SimulatedPosition] = {}
     instruments = {symbol: build_instrument(symbol, backtest) for symbol in rows_by_symbol}
-    trades: list[TradeRecord] = []
-    equity_curve: list[EquityPoint] = []
-    balance = backtest.starting_balance_usd
-    daily_realized: dict[str, float] = {}
-    cooldown_until_index: dict[str, int] = {}
-    blocked_entry_count = 0
+    state = _BacktestEngineState(
+        balance=backtest.starting_balance_usd,
+        positions={},
+        trades=[],
+        equity_curve=[],
+        daily_realized={},
+        cooldown_until_index={},
+    )
 
     global_rows = sorted(rows, key=lambda r: (r.timestamp, r.symbol))
     total_steps = len(global_rows)
@@ -251,157 +458,24 @@ def run_backtest_engine(
     for row in global_rows:
         series = rows_by_symbol[row.symbol]
         series_index = symbol_index_map[(row.symbol, row.timestamp.isoformat())]
-        instrument = instruments[row.symbol]
         pending_signal = pending_signals.pop((row.symbol, series_index), None)
-        current_day = row.timestamp.date().isoformat()
 
-        # --- Entry logic ---
-        if pending_signal is not None and row.symbol not in positions:
-            can_open = (
-                len(positions) < risk.max_open_positions
-                and daily_realized.get(current_day, 0.0) > -risk.max_daily_loss_usd
-                and cooldown_until_index.get(row.symbol, -1) < series_index
-            )
-            direction_ok = (pending_signal.direction == 1 and backtest.allow_long) or (
-                pending_signal.direction == -1 and backtest.allow_short
-            )
-            if can_open and direction_ok:
-                entry_price = _entry_execution_price(row.open, pending_signal.direction, instrument, backtest)
-                symbol_profile = symbol_exit_profiles.get(row.symbol)
-                stop_level = stop_policy.stop_loss_price(
-                    row=row,
-                    entry_price=entry_price,
-                    direction=pending_signal.direction,
-                    backtest=backtest,
-                    risk=risk,
-                    dynamic_config=dynamic_exit_config,
-                    symbol_profile=symbol_profile,
-                )
-                target_level = target_policy.take_profit_price(
-                    row=row,
-                    entry_price=entry_price,
-                    direction=pending_signal.direction,
-                    backtest=backtest,
-                    risk=risk,
-                    dynamic_config=dynamic_exit_config,
-                    symbol_profile=symbol_profile,
-                )
-                stop_price = stop_level.price
-                take_profit_price = target_level.price
-                volume_lots = calculate_position_size(
-                    balance=balance,
-                    risk_per_trade=risk.risk_per_trade,
-                    entry_price=entry_price,
-                    stop_loss_price=stop_price,
-                    instrument=instrument,
-                    aux_rates=aux_rates,
-                )
-                if volume_lots > 0.0:
-                    positions[row.symbol] = SimulatedPosition(
-                        symbol=row.symbol,
-                        timeframe=row.timeframe,
-                        direction=pending_signal.direction,
-                        volume_lots=volume_lots,
-                        entry_timestamp=row.timestamp,
-                        entry_index=series_index,
-                        signal_timestamp=pending_signal.generated_at,
-                        signal_probability_long=pending_signal.probability_long,
-                        signal_probability_short=pending_signal.probability_short,
-                        entry_price=entry_price,
-                        stop_loss_price=stop_price,
-                        take_profit_price=take_profit_price,
-                        stop_policy=stop_policy.name,
-                        target_policy=target_policy.name,
-                        stop_policy_details=stop_level.details,
-                        target_policy_details=target_level.details,
-                        commission_entry_usd=_commission_usd(volume_lots, backtest),
-                    )
-                else:
-                    blocked_entry_count += 1
-
-        # --- Exit logic ---
-        active = positions.get(row.symbol)
-        if active is not None:
-            raw_exit_price, exit_reason, is_ambiguous = _resolve_intrabar_exit(
-                direction=active.direction,
-                bar_low=row.low,
-                bar_high=row.high,
-                stop_loss_price=active.stop_loss_price,
-                take_profit_price=active.take_profit_price,
-                policy=intrabar_policy,
+        # --- Entry ---
+        if pending_signal is not None and row.symbol not in state.positions:
+            _try_enter_position(
+                state, row, series, series_index, pending_signal, instruments,
+                backtest, risk, stop_policy, target_policy,
+                dynamic_exit_config, symbol_exit_profiles, aux_rates,
             )
 
-            if exit_reason is None:
-                active.bars_held += 1
-                if active.bars_held >= backtest.max_holding_bars:
-                    raw_exit_price = row.close
-                    exit_reason = "time_exit"
-                    is_ambiguous = False
-            else:
-                active.bars_held += 1
+        # --- Exit ---
+        _try_close_position(state, row, series, series_index, instruments, backtest, risk, intrabar_policy, aux_rates)
 
-            if exit_reason is not None and raw_exit_price is not None:
-                exit_price = _exit_execution_price(raw_exit_price, active.direction, instrument, backtest)
-                gross_pnl = realized_pnl_usd(
-                    instrument,
-                    active.entry_price,
-                    exit_price,
-                    active.direction,
-                    active.volume_lots,
-                    aux_rates,
-                )
-                commission_exit = _commission_usd(active.volume_lots, backtest)
-                entry_raw_price = series[active.entry_index].open
-                spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
-                    instrument,
-                    entry_raw_price,
-                    raw_exit_price,
-                    active.direction,
-                    active.volume_lots,
-                    backtest,
-                    aux_rates,
-                )
-                net_pnl = gross_pnl - active.commission_entry_usd - commission_exit
-                balance += net_pnl
-                daily_realized[current_day] = daily_realized.get(current_day, 0.0) + net_pnl
-                if net_pnl < 0.0 and risk.cooldown_bars_after_loss > 0:
-                    cooldown_until_index[row.symbol] = series_index + risk.cooldown_bars_after_loss
-                trades.append(
-                    TradeRecord(
-                        symbol=row.symbol,
-                        timeframe=row.timeframe,
-                        direction=active.direction,
-                        entry_timestamp=active.entry_timestamp.isoformat(),
-                        exit_timestamp=row.timestamp.isoformat(),
-                        signal_timestamp=active.signal_timestamp.isoformat(),
-                        entry_price=active.entry_price,
-                        exit_price=exit_price,
-                        stop_loss_price=active.stop_loss_price,
-                        take_profit_price=active.take_profit_price,
-                        volume_lots=active.volume_lots,
-                        gross_pnl_usd=gross_pnl,
-                        net_pnl_usd=net_pnl,
-                        total_commission_usd=active.commission_entry_usd + commission_exit,
-                        spread_cost_usd=spread_cost_usd,
-                        slippage_cost_usd=slippage_cost_usd,
-                        exit_reason=exit_reason,
-                        bars_held=active.bars_held,
-                        probability_long=active.signal_probability_long,
-                        probability_short=active.signal_probability_short,
-                        stop_policy=active.stop_policy,
-                        target_policy=active.target_policy,
-                        stop_policy_details=active.stop_policy_details,
-                        target_policy_details=active.target_policy_details,
-                        is_intrabar_ambiguous=is_ambiguous,
-                    )
-                )
-                positions.pop(row.symbol, None)
-
-        # --- Signal generation (current bar) ---
+        # --- Signal generation ---
         probability = row_key_to_probability[(row.timestamp.isoformat(), row.symbol, row.timeframe)]
         effective_threshold = threshold_by_symbol.get(row.symbol, threshold)
         signal = apply_probability_threshold([probability], effective_threshold)[0]
-        if signal != 0 and row.symbol not in positions and series_index + 1 < len(series):
+        if signal != 0 and row.symbol not in state.positions and series_index + 1 < len(series):
             if (signal == 1 and backtest.allow_long) or (signal == -1 and backtest.allow_short):
                 pending_signals[(row.symbol, series_index + 1)] = PendingSignal(
                     direction=signal,
@@ -411,87 +485,25 @@ def run_backtest_engine(
                 )
 
         # --- Equity snapshot ---
-        equity = balance
-        for pos in positions.values():
+        equity = state.balance
+        for pos in state.positions.values():
             pos_instrument = instruments[pos.symbol]
-            # Use the most recent available bar for this position's symbol
             pos_bar_index = min(pos.entry_index + pos.bars_held, len(rows_by_symbol[pos.symbol]) - 1)
             pos_bar = rows_by_symbol[pos.symbol][pos_bar_index]
             equity += _mark_to_market(pos, pos_bar, pos_instrument, backtest, aux_rates)
-
-        equity_curve.append(
-            EquityPoint(
-                timestamp=row.timestamp.isoformat(),
-                balance=balance,
-                equity=equity,
-                open_positions=len(positions),
-            )
+        state.equity_curve.append(
+            EquityPoint(timestamp=row.timestamp.isoformat(), balance=state.balance, equity=equity, open_positions=len(state.positions))
         )
 
-    # --- End-of-data: close all remaining positions ---
-    for symbol, position in list(positions.items()):
-        series = rows_by_symbol[symbol]
-        last_row = series[-1]
-        instrument = instruments[symbol]
-        exit_price = _exit_execution_price(last_row.close, position.direction, instrument, backtest)
-        gross_pnl = realized_pnl_usd(
-            instrument,
-            position.entry_price,
-            exit_price,
-            position.direction,
-            position.volume_lots,
-            aux_rates,
-        )
-        commission_exit = _commission_usd(position.volume_lots, backtest)
-        entry_raw_price = series[position.entry_index].open
-        spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
-            instrument,
-            entry_raw_price,
-            last_row.close,
-            position.direction,
-            position.volume_lots,
-            backtest,
-            aux_rates,
-        )
-        net_pnl = gross_pnl - position.commission_entry_usd - commission_exit
-        balance += net_pnl
-        trades.append(
-            TradeRecord(
-                symbol=position.symbol,
-                timeframe=position.timeframe,
-                direction=position.direction,
-                entry_timestamp=position.entry_timestamp.isoformat(),
-                exit_timestamp=last_row.timestamp.isoformat(),
-                signal_timestamp=position.signal_timestamp.isoformat(),
-                entry_price=position.entry_price,
-                exit_price=exit_price,
-                stop_loss_price=position.stop_loss_price,
-                take_profit_price=position.take_profit_price,
-                volume_lots=position.volume_lots,
-                gross_pnl_usd=gross_pnl,
-                net_pnl_usd=net_pnl,
-                total_commission_usd=position.commission_entry_usd + commission_exit,
-                spread_cost_usd=spread_cost_usd,
-                slippage_cost_usd=slippage_cost_usd,
-                exit_reason="end_of_data",
-                bars_held=position.bars_held,
-                probability_long=position.signal_probability_long,
-                probability_short=position.signal_probability_short,
-                stop_policy=position.stop_policy,
-                target_policy=position.target_policy,
-                stop_policy_details=position.stop_policy_details,
-                target_policy_details=position.target_policy_details,
-                is_intrabar_ambiguous=False,
-            )
-        )
-        positions.pop(symbol, None)
+    # --- End-of-data: close remaining ---
+    _close_remaining_positions(state, rows_by_symbol, instruments, backtest, aux_rates)
 
-    metrics = _trade_metrics(trades, backtest.starting_balance_usd, balance, equity_curve, total_steps)
-    metrics["by_symbol"] = summarize_trades_by_symbol(trades)
-    metrics["blocked_entry_count"] = blocked_entry_count
-    metrics["intrabar_ambiguous_count"] = sum(1 for t in trades if t.is_intrabar_ambiguous)
+    metrics = _trade_metrics(state.trades, backtest.starting_balance_usd, state.balance, state.equity_curve, total_steps)
+    metrics["by_symbol"] = summarize_trades_by_symbol(state.trades)
+    metrics["blocked_entry_count"] = state.blocked_entry_count
+    metrics["intrabar_ambiguous_count"] = sum(1 for t in state.trades if t.is_intrabar_ambiguous)
     metrics["intrabar_policy"] = intrabar_policy
-    return metrics, trades, equity_curve
+    return metrics, state.trades, state.equity_curve
 
 
 # ---------------------------------------------------------------------------

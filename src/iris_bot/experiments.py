@@ -76,6 +76,24 @@ def _write_significance_trials_csv(path: Path, payload: dict[str, object]) -> No
             )
 
 
+def _compute_economic_sample_weights(rows: list[ProcessedRow], cap: float = 3.0) -> list[float]:
+    """Weight each training sample by ATR-relative economic significance.
+
+    Bars with larger ATR (wider potential move) are more economically significant:
+    correctly predicting direction there yields proportionally more P&L.  Weights are
+    normalized so the median bar has weight 1.0, and capped at `cap` to prevent extreme
+    outliers from dominating gradient updates.
+
+    Falls back to uniform weights when ATR is unavailable or the median is zero.
+    """
+    atrs = [row.features.get("atr_5", 0.0) for row in rows]
+    sorted_atrs = sorted(atrs)
+    median_atr = sorted_atrs[len(sorted_atrs) // 2] if sorted_atrs else 0.0
+    if median_atr <= 0.0:
+        return [1.0] * len(rows)
+    return [min(atr / median_atr, cap) for atr in atrs]
+
+
 def run_experiment(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "experiment")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
@@ -113,9 +131,18 @@ def run_experiment(settings: Settings) -> int:
     baseline_predictions = apply_score_threshold(baseline_test_scores, baseline_threshold.threshold)
     baseline_metrics = classification_metrics(test_labels, baseline_predictions)
 
+    economic_weights = _compute_economic_sample_weights(split.train)
+
     xgb_model = XGBoostMultiClassModel(settings.xgboost)
     try:
-        xgb_model.fit(train_matrix, train_labels, validation_matrix, validation_labels, feature_names=feature_names)
+        xgb_model.fit(
+            train_matrix,
+            train_labels,
+            validation_matrix,
+            validation_labels,
+            feature_names=feature_names,
+            sample_weights=economic_weights,
+        )
     except RuntimeError as exc:
         logger.error(str(exc))
         return 2
@@ -236,6 +263,13 @@ def run_experiment(settings: Settings) -> int:
                 },
                 "probability_calibration": xgb_model.probability_calibration_metadata(),
                 "feature_importance": xgb_model.feature_importance(),
+                "economic_sample_weights": {
+                    "enabled": True,
+                    "cap": 3.0,
+                    "min": min(economic_weights),
+                    "max": max(economic_weights),
+                    "mean": sum(economic_weights) / len(economic_weights),
+                },
             },
             "walk_forward": walk_forward_payload,
             "significance": significance_payload,

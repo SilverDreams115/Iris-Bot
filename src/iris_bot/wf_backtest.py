@@ -153,6 +153,144 @@ def _compute_aggregate(
     }
 
 
+_MIN_TRAIN = 30
+_MIN_VAL = 10
+_MIN_TEST = 5
+
+
+def _run_fold(
+    window: object,
+    rows: list[ProcessedRow],
+    feature_names: list[str],
+    settings: Settings,
+    run_dir: Path,
+    aux_rates: dict[str, float] | None,
+    persist_artifacts: bool,
+    logger: logging.Logger,
+    symbol_profiles: dict,
+    policy: str,
+) -> tuple[WalkForwardFoldSummary, dict[str, object]]:
+    """Execute a single walk-forward fold. Returns (summary, report_dict)."""
+    fold_index = window.fold_index  # type: ignore[union-attr]
+    train_rows = rows[window.train_start : window.train_end]  # type: ignore[union-attr]
+    val_rows = rows[window.validation_start : window.validation_end]  # type: ignore[union-attr]
+    test_rows = rows[window.test_start : window.test_end]  # type: ignore[union-attr]
+
+    def _skip(reason: str) -> tuple[WalkForwardFoldSummary, dict[str, object]]:
+        logger.warning("fold=%02d skipped: %s", fold_index, reason)
+        return (
+            _skipped_summary(fold_index, reason),
+            {"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()},  # type: ignore[union-attr]
+        )
+
+    if len(train_rows) < _MIN_TRAIN:
+        return _skip(f"train_rows={len(train_rows)} < {_MIN_TRAIN}")
+    if len(val_rows) < _MIN_VAL:
+        return _skip(f"val_rows={len(val_rows)} < {_MIN_VAL}")
+    if len(test_rows) < _MIN_TEST:
+        return _skip(f"test_rows={len(test_rows)} < {_MIN_TEST}")
+
+    try:
+        train_matrix, train_labels = _extract_matrix(train_rows, feature_names)
+        val_matrix, val_labels = _extract_matrix(val_rows, feature_names)
+        test_matrix, _ = _extract_matrix(test_rows, feature_names)
+    except (ValueError, KeyError) as exc:
+        return _skip(f"feature extraction failed: {exc}")
+
+    fold_model = XGBoostMultiClassModel(settings.xgboost)
+    try:
+        fold_model.fit(train_matrix, train_labels, val_matrix, val_labels)
+    except RuntimeError as exc:
+        return _skip(f"model training failed: {exc}")
+
+    val_probs = fold_model.predict_probabilities(val_matrix)
+    threshold_result = select_threshold_from_probabilities(
+        probabilities=val_probs,
+        labels=val_labels,
+        grid=settings.threshold.grid,
+        metric_name=settings.threshold.objective_metric,
+        refinement_steps=settings.threshold.refinement_steps,
+    )
+
+    test_probs = fold_model.predict_probabilities(test_matrix)
+    metrics, trades, equity_curve = run_backtest_engine(
+        rows=test_rows,
+        probabilities=test_probs,
+        threshold=threshold_result.threshold,
+        backtest=settings.backtest,
+        risk=settings.risk,
+        intrabar_policy=policy,
+        aux_rates=aux_rates,
+        exit_policy_config=settings.exit_policy,
+        dynamic_exit_config=settings.dynamic_exits,
+        symbol_exit_profiles={sym: prof.exit_profile for sym, prof in symbol_profiles.items()},
+    )
+
+    consistency = verify_engine_consistency(
+        trades=trades,
+        equity_curve=equity_curve,
+        starting_balance=settings.backtest.starting_balance_usd,
+    )
+    if not consistency.is_clean:
+        logger.warning("fold=%02d consistency FAILED errors=%s", fold_index, consistency.error_count)
+
+    fold_report: dict[str, object] = {
+        "fold": fold_index,
+        "skipped": False,
+        "window": window.to_dict(),  # type: ignore[union-attr]
+        "intrabar_policy": policy,
+        "threshold": threshold_result.threshold,
+        "threshold_metric": threshold_result.metric_name,
+        "threshold_value": threshold_result.metric_value,
+        "train_rows": len(train_rows),
+        "val_rows": len(val_rows),
+        "test_rows": len(test_rows),
+        "metrics": metrics,
+        "trade_count": len(trades),
+        "consistency": consistency.to_dict(),
+    }
+    if persist_artifacts:
+        fold_dir = run_dir / f"fold_{fold_index:02d}"
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        if trades:
+            write_trade_log(fold_dir / "trade_log.csv", trades)
+        write_equity_curve(fold_dir / "equity_curve.csv", equity_curve)
+        write_json_report(fold_dir, "fold_report.json", fold_report)
+
+    summary = WalkForwardFoldSummary(
+        fold_index=fold_index,
+        skipped=False,
+        skip_reason=None,
+        train_rows=len(train_rows),
+        val_rows=len(val_rows),
+        test_rows=len(test_rows),
+        threshold=threshold_result.threshold,
+        total_trades=_metric_int(metrics, "total_trades"),
+        net_pnl_usd=_metric_float(metrics, "net_pnl_usd"),
+        win_rate=_metric_float(metrics, "win_rate"),
+        profit_factor=_metric_float(metrics, "profit_factor"),
+        max_drawdown_usd=_metric_float(metrics, "max_drawdown_usd"),
+        return_pct=_metric_float(metrics, "return_pct"),
+        intrabar_ambiguous_count=_metric_int(metrics, "intrabar_ambiguous_count"),
+        blocked_entry_count=_metric_int(metrics, "blocked_entry_count"),
+        consistency_is_clean=consistency.is_clean,
+        consistency_errors=consistency.error_count,
+        consistency_warnings=consistency.warning_count,
+    )
+    logger.info(
+        "fold=%02d done  trades=%d  net_pnl=%.2f  win_rate=%.2f  "
+        "pf=%.2f  ambiguous=%d  consistency=%s",
+        fold_index,
+        summary.total_trades,
+        summary.net_pnl_usd,
+        summary.win_rate,
+        summary.profit_factor,
+        summary.intrabar_ambiguous_count,
+        "ok" if consistency.is_clean else f"ERRORS={consistency.error_count}",
+    )
+    return summary, fold_report
+
+
 def run_walkforward_economic_backtest(
     rows: list[ProcessedRow],
     feature_names: list[str],
@@ -193,8 +331,8 @@ def run_walkforward_economic_backtest(
 
     if not windows:
         logger.warning(
-            "No se generaron ventanas walk-forward con %s filas "
-            "(train=%s val=%s test=%s step=%s). Se necesitan al menos %s filas.",
+            "No walk-forward windows generated for %s rows "
+            "(train=%s val=%s test=%s step=%s). Need at least %s rows.",
             len(rows),
             settings.walk_forward.train_window,
             settings.walk_forward.validation_window,
@@ -213,167 +351,23 @@ def run_walkforward_economic_backtest(
             "skipped_folds": 0,
         }
 
-    MIN_TRAIN = 30
-    MIN_VAL = 10
-    MIN_TEST = 5
-
     fold_summaries: list[WalkForwardFoldSummary] = []
     fold_reports: list[dict[str, object]] = []
 
     for window in windows:
-        fold_index = window.fold_index
         logger.info(
             "wf_economic fold=%02d  train=[%d,%d)  val=[%d,%d)  test=[%d,%d)",
-            fold_index,
+            window.fold_index,
             window.train_start, window.train_end,
             window.validation_start, window.validation_end,
             window.test_start, window.test_end,
         )
-
-        train_rows = rows[window.train_start : window.train_end]
-        val_rows = rows[window.validation_start : window.validation_end]
-        test_rows = rows[window.test_start : window.test_end]
-
-        # Minimum size checks
-        if len(train_rows) < MIN_TRAIN:
-            reason = f"train_rows={len(train_rows)} < {MIN_TRAIN}"
-            fold_summaries.append(_skipped_summary(fold_index, reason))
-            fold_reports.append({"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()})
-            logger.warning("fold=%02d saltado: %s", fold_index, reason)
-            continue
-
-        if len(val_rows) < MIN_VAL:
-            reason = f"val_rows={len(val_rows)} < {MIN_VAL}"
-            fold_summaries.append(_skipped_summary(fold_index, reason))
-            fold_reports.append({"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()})
-            logger.warning("fold=%02d saltado: %s", fold_index, reason)
-            continue
-
-        if len(test_rows) < MIN_TEST:
-            reason = f"test_rows={len(test_rows)} < {MIN_TEST}"
-            fold_summaries.append(_skipped_summary(fold_index, reason))
-            fold_reports.append({"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()})
-            logger.warning("fold=%02d saltado: %s", fold_index, reason)
-            continue
-
-        # Feature extraction
-        try:
-            train_matrix, train_labels = _extract_matrix(train_rows, feature_names)
-            val_matrix, val_labels = _extract_matrix(val_rows, feature_names)
-            test_matrix, _ = _extract_matrix(test_rows, feature_names)
-        except (ValueError, KeyError) as exc:
-            reason = f"feature extraction failed: {exc}"
-            fold_summaries.append(_skipped_summary(fold_index, reason))
-            fold_reports.append({"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()})
-            logger.warning("fold=%02d saltado: %s", fold_index, reason)
-            continue
-
-        # Train fold-specific model
-        fold_model = XGBoostMultiClassModel(settings.xgboost)
-        try:
-            fold_model.fit(train_matrix, train_labels, val_matrix, val_labels)
-        except RuntimeError as exc:
-            reason = f"model training failed: {exc}"
-            fold_summaries.append(_skipped_summary(fold_index, reason))
-            fold_reports.append({"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()})
-            logger.warning("fold=%02d saltado: %s", fold_index, reason)
-            continue
-
-        # Select threshold on fold validation set
-        val_probs = fold_model.predict_probabilities(val_matrix)
-        threshold_result = select_threshold_from_probabilities(
-            probabilities=val_probs,
-            labels=val_labels,
-            grid=settings.threshold.grid,
-            metric_name=settings.threshold.objective_metric,
-            refinement_steps=settings.threshold.refinement_steps,
-        )
-
-        # Economic replay on fold test set
-        test_probs = fold_model.predict_probabilities(test_matrix)
-        metrics, trades, equity_curve = run_backtest_engine(
-            rows=test_rows,
-            probabilities=test_probs,
-            threshold=threshold_result.threshold,
-            backtest=settings.backtest,
-            risk=settings.risk,
-            intrabar_policy=policy,
-            aux_rates=aux_rates,
-            exit_policy_config=settings.exit_policy,
-            dynamic_exit_config=settings.dynamic_exits,
-            symbol_exit_profiles={symbol: profile.exit_profile for symbol, profile in symbol_profiles.items()},
-        )
-
-        # Consistency validation
-        consistency = verify_engine_consistency(
-            trades=trades,
-            equity_curve=equity_curve,
-            starting_balance=settings.backtest.starting_balance_usd,
-        )
-        if not consistency.is_clean:
-            logger.warning(
-                "fold=%02d consistency FAILED errors=%s",
-                fold_index, consistency.error_count
-            )
-
-        # Save fold artifacts
-        fold_report: dict[str, object] = {
-            "fold": fold_index,
-            "skipped": False,
-            "window": window.to_dict(),
-            "intrabar_policy": policy,
-            "threshold": threshold_result.threshold,
-            "threshold_metric": threshold_result.metric_name,
-            "threshold_value": threshold_result.metric_value,
-            "train_rows": len(train_rows),
-            "val_rows": len(val_rows),
-            "test_rows": len(test_rows),
-            "metrics": metrics,
-            "trade_count": len(trades),
-            "consistency": consistency.to_dict(),
-        }
-        if persist_artifacts:
-            fold_dir = run_dir / f"fold_{fold_index:02d}"
-            fold_dir.mkdir(parents=True, exist_ok=True)
-            if trades:
-                write_trade_log(fold_dir / "trade_log.csv", trades)
-            write_equity_curve(fold_dir / "equity_curve.csv", equity_curve)
-            write_json_report(fold_dir, "fold_report.json", fold_report)
-        fold_reports.append(fold_report)
-
-        summary = WalkForwardFoldSummary(
-            fold_index=fold_index,
-            skipped=False,
-            skip_reason=None,
-            train_rows=len(train_rows),
-            val_rows=len(val_rows),
-            test_rows=len(test_rows),
-            threshold=threshold_result.threshold,
-            total_trades=_metric_int(metrics, "total_trades"),
-            net_pnl_usd=_metric_float(metrics, "net_pnl_usd"),
-            win_rate=_metric_float(metrics, "win_rate"),
-            profit_factor=_metric_float(metrics, "profit_factor"),
-            max_drawdown_usd=_metric_float(metrics, "max_drawdown_usd"),
-            return_pct=_metric_float(metrics, "return_pct"),
-            intrabar_ambiguous_count=_metric_int(metrics, "intrabar_ambiguous_count"),
-            blocked_entry_count=_metric_int(metrics, "blocked_entry_count"),
-            consistency_is_clean=consistency.is_clean,
-            consistency_errors=consistency.error_count,
-            consistency_warnings=consistency.warning_count,
+        summary, report = _run_fold(
+            window, rows, feature_names, settings, run_dir,
+            aux_rates, persist_artifacts, logger, symbol_profiles, policy,
         )
         fold_summaries.append(summary)
-
-        logger.info(
-            "fold=%02d done  trades=%d  net_pnl=%.2f  win_rate=%.2f  "
-            "pf=%.2f  ambiguous=%d  consistency=%s",
-            fold_index,
-            summary.total_trades,
-            summary.net_pnl_usd,
-            summary.win_rate,
-            summary.profit_factor,
-            summary.intrabar_ambiguous_count,
-            "ok" if consistency.is_clean else f"ERRORS={consistency.error_count}",
-        )
+        fold_reports.append(report)
 
     valid_summaries = [s for s in fold_summaries if not s.skipped]
     aggregate = _compute_aggregate(valid_summaries, settings.backtest.starting_balance_usd)

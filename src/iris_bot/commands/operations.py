@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from iris_bot.config import Settings
+from iris_bot.demo_execution import (
+    activate_demo_execution_command,
+    demo_execution_preflight_command,
+    demo_execution_status_command,
+    run_demo_execution_command,
+    validate_model_artifact_command,
+)
 from iris_bot.demo_live_checklist import demo_live_checklist_command
 from iris_bot.demo_live_probe import run_demo_live_probe
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
@@ -83,6 +90,26 @@ def run_demo_live_probe_command(settings: Settings) -> int:
 def run_demo_live_checklist_command(settings: Settings) -> int:
     exit_code, _, _ = demo_live_checklist_command(settings)
     return exit_code
+
+
+def validate_model_artifact_runtime_command(settings: Settings) -> int:
+    return validate_model_artifact_command(settings)
+
+
+def activate_demo_execution_runtime_command(settings: Settings) -> int:
+    return activate_demo_execution_command(settings)
+
+
+def demo_execution_preflight_runtime_command(settings: Settings) -> int:
+    return demo_execution_preflight_command(settings)
+
+
+def run_demo_execution_runtime_command(settings: Settings) -> int:
+    return run_demo_execution_command(settings)
+
+
+def demo_execution_status_runtime_command(settings: Settings) -> int:
+    return demo_execution_status_command(settings)
 
 
 def operational_status_command(settings: Settings) -> int:

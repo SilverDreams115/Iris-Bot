@@ -47,10 +47,23 @@ def classification_metrics(y_true: list[int], y_pred: list[int]) -> dict[str, ob
 
     macro_f1 = sum(macro_f1_values) / len(macro_f1_values)
     balanced_accuracy = sum(recalls) / len(recalls)
+
+    # Directional precision: fraction of non-neutral predictions that are correct.
+    # The economically meaningful accuracy — neutral predictions cost nothing (no trade),
+    # only wrong directional calls lose money.
+    dir_tp = sum(
+        1
+        for actual, predicted in zip(y_true, y_pred, strict=False)
+        if predicted != 0 and actual == predicted
+    )
+    dir_total = sum(1 for predicted in y_pred if predicted != 0)
+    directional_precision = dir_tp / dir_total if dir_total > 0 else 0.0
+
     return {
         "accuracy": accuracy,
         "balanced_accuracy": balanced_accuracy,
         "macro_f1": macro_f1,
+        "directional_precision": directional_precision,
         "confusion_matrix": confusion_matrix(y_true, y_pred),
         "class_balance": class_balance(y_true),
         "per_class": per_class,

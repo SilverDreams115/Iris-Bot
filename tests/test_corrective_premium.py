@@ -70,7 +70,8 @@ class ConnectMT5:
         self.shutdown_called = True
 
     def terminal_info(self):
-        return {"connected": True} if self.initialize_ok and self.login_ok else None
+        auth_connected = self.auth_initialize_ok is True
+        return {"connected": True} if (self.initialize_ok and self.login_ok) or auth_connected else None
 
 
 def _bars(symbol: str, count: int) -> list[Bar]:

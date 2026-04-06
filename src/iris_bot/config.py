@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from iris_bot.config_runtime import load_settings, validate_config
+from iris_bot.config_runtime import env_source, load_settings, validate_config
 from iris_bot.config_types import (
     ApprovedDemoGateConfig,
     BacktestConfig,
     ChaosConfig,
     DataConfig,
+    DemoExecutionConfig,
     DynamicExitConfig,
     EnduranceConfig,
     ExitPolicyRuntimeConfig,
@@ -40,6 +41,7 @@ __all__ = [
     "BacktestConfig",
     "ChaosConfig",
     "DataConfig",
+    "DemoExecutionConfig",
     "DynamicExitConfig",
     "EnduranceConfig",
     "ExitPolicyRuntimeConfig",
@@ -63,6 +65,7 @@ __all__ = [
     "TradingConfig",
     "WalkForwardConfig",
     "XGBoostConfig",
+    "env_source",
     "load_settings",
     "settings",
     "validate_config",

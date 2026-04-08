@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+from iris_bot.durable_io import durable_write_json
 
 class _JsonLineFormatter(logging.Formatter):
     """Emit one JSON object per line (JSON Lines format).
@@ -63,5 +64,5 @@ def configure_logging(run_dir: Path, level: str, log_format: str = "text") -> lo
 
 def write_json_report(run_dir: Path, filename: str, payload: dict[str, object]) -> Path:
     path = run_dir / filename
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    durable_write_json(path, payload)
     return path

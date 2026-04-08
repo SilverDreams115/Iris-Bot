@@ -5,7 +5,15 @@ from dataclasses import asdict
 from pathlib import Path
 
 from iris_bot.baselines import MomentumSignBaseline
+from iris_bot.artifacts import attach_artifact_provenance, build_artifact_provenance
 from iris_bot.config import Settings
+from iris_bot.contract_versions import (
+    EVALUATION_CONTRACT_VERSION,
+    TRAINING_CONTRACT_VERSION,
+    contract_bundle_fingerprint,
+    contract_fingerprint,
+)
+from iris_bot.evaluation_contract import build_evaluation_contract
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.metrics import classification_metrics
 from iris_bot.preprocessing import validate_feature_rows
@@ -17,6 +25,11 @@ from iris_bot.thresholds import (
     apply_score_threshold,
     select_threshold_from_probabilities,
     select_threshold_from_scores,
+)
+from iris_bot.training_contract import (
+    build_training_contract,
+    compute_economic_sample_weights,
+    summarize_economic_sample_weights,
 )
 from iris_bot.walk_forward import generate_walk_forward_windows
 from iris_bot.xgb_model import XGBoostMultiClassModel
@@ -76,24 +89,6 @@ def _write_significance_trials_csv(path: Path, payload: dict[str, object]) -> No
             )
 
 
-def _compute_economic_sample_weights(rows: list[ProcessedRow], cap: float = 3.0) -> list[float]:
-    """Weight each training sample by ATR-relative economic significance.
-
-    Bars with larger ATR (wider potential move) are more economically significant:
-    correctly predicting direction there yields proportionally more P&L.  Weights are
-    normalized so the median bar has weight 1.0, and capped at `cap` to prevent extreme
-    outliers from dominating gradient updates.
-
-    Falls back to uniform weights when ATR is unavailable or the median is zero.
-    """
-    atrs = [row.features.get("atr_5", 0.0) for row in rows]
-    sorted_atrs = sorted(atrs)
-    median_atr = sorted_atrs[len(sorted_atrs) // 2] if sorted_atrs else 0.0
-    if median_atr <= 0.0:
-        return [1.0] * len(rows)
-    return [min(atr / median_atr, cap) for atr in atrs]
-
-
 def run_experiment(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "experiment")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
@@ -131,7 +126,13 @@ def run_experiment(settings: Settings) -> int:
     baseline_predictions = apply_score_threshold(baseline_test_scores, baseline_threshold.threshold)
     baseline_metrics = classification_metrics(test_labels, baseline_predictions)
 
-    economic_weights = _compute_economic_sample_weights(split.train)
+    training_contract = build_training_contract(
+        settings,
+        feature_names,
+        use_primary_timeframe_only=settings.experiment.use_primary_timeframe_only,
+        feature_source="processed_dataset.feature_names",
+    )
+    economic_weights = compute_economic_sample_weights(split.train)
 
     xgb_model = XGBoostMultiClassModel(settings.xgboost)
     try:
@@ -158,6 +159,18 @@ def run_experiment(settings: Settings) -> int:
     test_probabilities = xgb_model.predict_probabilities(test_matrix)
     xgb_predictions = apply_probability_threshold(test_probabilities, threshold_result.threshold)
     xgb_metrics = classification_metrics(test_labels, xgb_predictions)
+    evaluation_contract = build_evaluation_contract(
+        settings,
+        evaluation_mode="experiment_classification_test_split",
+        threshold_source="validation_probabilities",
+        threshold=threshold_result.threshold,
+        threshold_metric=threshold_result.metric_name,
+        threshold_value=threshold_result.metric_value,
+        threshold_by_symbol={},
+        profile_gating_mode="research_none",
+        allowed_profile_states=(),
+        consistency_requires_equity_curve=False,
+    )
 
     model_dir = run_dir / "models"
     xgb_model.save(model_dir / "xgboost_model.json", model_dir / "xgboost_metadata.json", feature_names)
@@ -192,7 +205,15 @@ def run_experiment(settings: Settings) -> int:
             fold_baseline_predictions = apply_score_threshold(fold_test_scores, fold_baseline_threshold.threshold)
 
             fold_model = XGBoostMultiClassModel(settings.xgboost)
-            fold_model.fit(wf_train_matrix, wf_train_labels, wf_validation_matrix, wf_validation_labels)
+            fold_economic_weights = compute_economic_sample_weights(train_rows)
+            fold_model.fit(
+                wf_train_matrix,
+                wf_train_labels,
+                wf_validation_matrix,
+                wf_validation_labels,
+                feature_names=feature_names,
+                sample_weights=fold_economic_weights,
+            )
             fold_validation_probabilities = fold_model.predict_probabilities(wf_validation_matrix)
             fold_threshold = select_threshold_from_probabilities(
                 fold_validation_probabilities,
@@ -238,13 +259,41 @@ def run_experiment(settings: Settings) -> int:
     if settings.significance.enabled:
         _write_significance_trials_csv(run_dir / "significance_trials.csv", significance_payload)
 
+    contract_hashes = {
+        "training_contract": contract_fingerprint(training_contract),
+        "evaluation_contract": contract_fingerprint(evaluation_contract),
+        "bundle": contract_bundle_fingerprint(training_contract, evaluation_contract),
+    }
+    report_provenance = build_artifact_provenance(
+        run_dir=run_dir,
+        training_contract_version=TRAINING_CONTRACT_VERSION,
+        evaluation_contract_version=EVALUATION_CONTRACT_VERSION,
+        contract_hashes=contract_hashes,
+        correlation_keys={
+            "command": "experiment",
+            "primary_timeframe": settings.trading.primary_timeframe,
+        },
+        references={
+            "processed_dataset_path": str(settings.experiment.processed_dataset_path),
+            "processed_manifest_path": str(settings.experiment.processed_manifest_path),
+        },
+        integrity={
+            "dataset_manifest_checksum": str(dataset.manifest.get("checksum", "")),
+        },
+    )
+
     write_json_report(
         run_dir,
         "experiment_report.json",
-        {
+        attach_artifact_provenance({
             "dataset_manifest": dataset.manifest,
             "dataset_schema": dataset.schema,
             "feature_names": feature_names,
+            "training_contract_version": TRAINING_CONTRACT_VERSION,
+            "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+            "training_contract": training_contract,
+            "evaluation_contract": evaluation_contract,
+            "contract_hashes": contract_hashes,
             "split_summary": [asdict(item) for item in split.summaries],
             "baseline": {
                 "name": settings.experiment.benchmark_name,
@@ -263,29 +312,23 @@ def run_experiment(settings: Settings) -> int:
                 },
                 "probability_calibration": xgb_model.probability_calibration_metadata(),
                 "feature_importance": xgb_model.feature_importance(),
-                "economic_sample_weights": {
-                    "enabled": True,
-                    "cap": 3.0,
-                    "min": min(economic_weights),
-                    "max": max(economic_weights),
-                    "mean": sum(economic_weights) / len(economic_weights),
-                },
+                "economic_sample_weights": summarize_economic_sample_weights(economic_weights),
             },
             "walk_forward": walk_forward_payload,
             "significance": significance_payload,
-        },
+        }, report_provenance),
     )
     write_json_report(
         run_dir,
         "experiment_config.json",
-        {
+        attach_artifact_provenance({
             "labeling": asdict(settings.labeling),
             "split": asdict(settings.split),
             "walk_forward": asdict(settings.walk_forward),
             "threshold": asdict(settings.threshold),
             "xgboost": asdict(settings.xgboost),
             "significance": asdict(settings.significance),
-        },
+        }, report_provenance),
     )
     logger.info("experiment rows=%s feature_count=%s run_dir=%s", len(rows), len(feature_names), run_dir)
     return 0

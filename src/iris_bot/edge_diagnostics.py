@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, median, pstdev
-from typing import Any
+from typing import Any, Sequence
 
 from iris_bot.artifacts import read_artifact_payload, wrap_artifact
 from iris_bot.backtest import TradeRecord, run_backtest_engine
@@ -18,6 +18,7 @@ from iris_bot.regime_rework import (
     SECONDARY_SYMBOL,
     TARGET_SYMBOLS,
     VARIANT_SPECS,
+    VariantSpec,
     _build_symbol_rows,
     _feature_names,
     _latest_run_dir,
@@ -64,7 +65,7 @@ def _safe_int(value: object, default: int = 0) -> int:
     return default
 
 
-def _quantiles(values: list[float]) -> dict[str, float]:
+def _quantiles(values: Sequence[float | int]) -> dict[str, float]:
     if not values:
         return {"min": 0.0, "p25": 0.0, "median": 0.0, "p75": 0.0, "p90": 0.0, "max": 0.0, "mean": 0.0}
     ordered = sorted(values)
@@ -95,14 +96,14 @@ def _normalize_importance(raw: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _baseline_variant():
+def _baseline_variant() -> VariantSpec:
     for variant in VARIANT_SPECS:
         if variant.variant_id == BASELINE_VARIANT_ID:
             return variant
     raise RuntimeError(f"Variante baseline no encontrada: {BASELINE_VARIANT_ID}")
 
 
-def _variant_by_id(variant_id: str):
+def _variant_by_id(variant_id: str) -> VariantSpec:
     for variant in VARIANT_SPECS:
         if variant.variant_id == variant_id:
             return variant
@@ -295,10 +296,10 @@ def _trade_breakdown(
         )
     grouped_trades: dict[str, list[TradeRecord]] = defaultdict(list)
     for trade in trades:
-        row = row_index.get(trade.signal_timestamp)
-        if row is None:
+        signal_row = row_index.get(trade.signal_timestamp)
+        if signal_row is None:
             continue
-        grouped_trades[_row_key(row, key_name)].append(trade)
+        grouped_trades[_row_key(signal_row, key_name)].append(trade)
     payload: dict[str, Any] = {}
     for key, items in sorted(grouped_rows.items()):
         trade_subset = grouped_trades.get(key, [])
@@ -726,7 +727,9 @@ def _conservative_final_decision(hypotheses: list[dict[str, Any]]) -> str:
     return mapping.get(top, "EDGE_NOT_STRONG_ENOUGH")
 
 
-def _hypothesis_matrix(settings: Settings) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _hypothesis_matrix(
+    settings: Settings,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     baseline = {symbol: _baseline_symbol_report(settings, symbol) for symbol in TARGET_SYMBOLS}
     label_noise = {symbol: _label_noise_symbol_report(settings, symbol) for symbol in TARGET_SYMBOLS}
     horizon = {symbol: _horizon_exit_symbol_report(settings, symbol) for symbol in TARGET_SYMBOLS}

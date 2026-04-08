@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -426,6 +426,9 @@ def load_latest_demo_audit(settings: Settings) -> dict[str, Any] | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw.get("payload", raw)
+        if not isinstance(raw, dict):
+            return None
+        payload = raw.get("payload", raw)
+        return payload if isinstance(payload, dict) else None
     except (json.JSONDecodeError, OSError):
         return None

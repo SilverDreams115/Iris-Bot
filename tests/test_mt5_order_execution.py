@@ -4,11 +4,9 @@ Uses a fully-mocked MT5 module — no real MT5 connection needed.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 
 from iris_bot.config_types import MT5Config
 from iris_bot.mt5 import MT5Client, OrderRequest, OrderResult

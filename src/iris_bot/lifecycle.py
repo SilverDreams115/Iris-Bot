@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,7 +24,26 @@ class LifecycleMismatch:
         return asdict(self)
 
 
-def _parse_local_intents(state: Any) -> list[dict[str, Any]]:
+def _parse_iso_datetime(timestamp_text: str) -> datetime | None:
+    if not timestamp_text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _is_recent_trade(exit_timestamp: str, history_days: int) -> bool:
+    parsed = _parse_iso_datetime(exit_timestamp)
+    if parsed is None:
+        return False
+    return parsed >= datetime.now(tz=UTC) - timedelta(days=history_days)
+
+
+def _parse_local_intents(state: Any, *, history_days: int) -> list[dict[str, Any]]:
     items = []
     for intent in state.pending_intents:
         items.append(
@@ -48,6 +68,23 @@ def _parse_local_intents(state: Any) -> list[dict[str, Any]]:
                 "active_profile_id": position.active_profile_id,
                 "promotion_state": position.promotion_state,
                 "local_position": True,
+            }
+        )
+    for trade in state.closed_positions:
+        if not _is_recent_trade(trade.exit_timestamp, history_days):
+            continue
+        items.append(
+            {
+                "symbol": trade.symbol,
+                "created_at": trade.entry_timestamp,
+                "signal_timestamp": trade.signal_timestamp,
+                "side": "buy" if trade.direction == 1 else "sell",
+                "volume_lots": trade.volume_lots,
+                "active_profile_id": trade.active_profile_id,
+                "promotion_state": trade.promotion_state,
+                "local_closed_trade": True,
+                "exit_timestamp": trade.exit_timestamp,
+                "exit_reason": trade.exit_reason,
             }
         )
     return items
@@ -175,7 +212,7 @@ def run_lifecycle_reconciliation(
         broker_trace = client.broker_lifecycle_snapshot(settings.trading.symbols, settings.lifecycle.history_days)
     finally:
         client.shutdown()
-    local_trace = _parse_local_intents(local_state)
+    local_trace = _parse_local_intents(local_state, history_days=settings.lifecycle.history_days)
     reconciliation = reconcile_lifecycle_records(local_trace, broker_trace, volume_tolerance=settings.reconciliation.volume_tolerance)
     symbols: dict[str, Any] = {}
     for symbol in settings.trading.symbols:

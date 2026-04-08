@@ -54,6 +54,20 @@ def triple_barrier_label(series: list[Bar], index: int, config: LabelingConfig) 
 
     last_bar = horizon_slice[-1]
     terminal_move = 0.0 if current.close == 0.0 else (last_bar.close - current.close) / current.close
+    timeout_direction_floor = max(
+        config.min_abs_return,
+        min(config.take_profit_pct, config.stop_loss_pct) * config.timeout_direction_min_barrier_fraction,
+    )
+    if (
+        config.allow_no_trade
+        and config.timeout_handling_mode == "neutral_by_barrier_fraction"
+        and abs(terminal_move) < timeout_direction_floor
+    ):
+        return LabelOutcome(
+            label=0,
+            label_reason="triple_barrier_timeout_filtered_small_move",
+            horizon_end_timestamp=last_bar.timestamp.isoformat(),
+        )
     if abs(terminal_move) < config.min_abs_return and config.allow_no_trade:
         label = 0
         reason = "triple_barrier_timeout_small_move"

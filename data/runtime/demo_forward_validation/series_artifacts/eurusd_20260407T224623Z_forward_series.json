@@ -1,0 +1,107 @@
+{
+  "artifact_type": "demo_session_series",
+  "artifact_version": "demo_session_series.v1",
+  "checksum": "2fb4869ae6762bde38017ab06008f7f1a2b537c7d6e38dda69bfa3ba8831881a",
+  "compatibility": {},
+  "generated_at": "2026-04-07T22:52:37.455851+00:00",
+  "payload": {
+    "aggregate_counts": {
+      "aborted_sessions": 0,
+      "circuit_breaker_triggers": 0,
+      "hold_sessions": 0,
+      "kill_switch_events": 0,
+      "orders_rejected": 0,
+      "orders_sent": 4,
+      "reconciliations": 4,
+      "recoveries": 0,
+      "restore_events": 4,
+      "sessions_with_divergence": 0,
+      "sessions_with_recovery": 0,
+      "successful_sessions": 4
+    },
+    "divergence_summary": {
+      "divergence_events": 0,
+      "reconcile_events": 2,
+      "sessions_with_divergence": 0
+    },
+    "ended_at": null,
+    "execution_summary": {
+      "decisions_executed": 2,
+      "orders_rejected": 0,
+      "orders_sent": 2
+    },
+    "forward_metrics": {
+      "average_position_lifetime_seconds": 0.0,
+      "block_rate": 0.0,
+      "divergence_rate": 0.0,
+      "realized_pnl_usd": 0.0,
+      "reconcile_rate": 1.0,
+      "recovery_rate": 0.0,
+      "reject_rate": 0.0,
+      "sessions_counted": 2
+    },
+    "generated_at": "2026-04-07T22:52:37.455790+00:00",
+    "restore_recovery_summary": {
+      "recovery_events": 0,
+      "restore_events": 2,
+      "sessions_with_recovery": 0
+    },
+    "session_ids": [
+      "20260407T224813Z_run_demo_execution",
+      "20260407T224830Z_run_demo_execution"
+    ],
+    "session_reviews": [
+      {
+        "blockers": [],
+        "classification": "healthy",
+        "evaluated_at": "2026-04-07T22:48:14.331418+00:00",
+        "evidence_complete": true,
+        "had_abort": false,
+        "had_kill_switch_or_breaker": false,
+        "had_reconcile_mismatch": false,
+        "had_recovery": false,
+        "had_restore": true,
+        "operationally_healthy": true,
+        "recommendation": "continue",
+        "session_id": "20260407T224813Z_run_demo_execution",
+        "session_series_id": "eurusd_20260407T224623Z_forward_series",
+        "valid_for_forward_validation": true,
+        "warnings": []
+      },
+      {
+        "blockers": [],
+        "classification": "healthy",
+        "evaluated_at": "2026-04-07T22:48:31.374145+00:00",
+        "evidence_complete": true,
+        "had_abort": false,
+        "had_kill_switch_or_breaker": false,
+        "had_reconcile_mismatch": false,
+        "had_recovery": false,
+        "had_restore": true,
+        "operationally_healthy": true,
+        "recommendation": "continue",
+        "session_id": "20260407T224830Z_run_demo_execution",
+        "session_series_id": "eurusd_20260407T224623Z_forward_series",
+        "valid_for_forward_validation": true,
+        "warnings": []
+      }
+    ],
+    "session_series_id": "eurusd_20260407T224623Z_forward_series",
+    "signal_summary": {
+      "blocked_signals": 0,
+      "no_trade_signals": 0,
+      "signals_generated": 2
+    },
+    "started_at": "2026-04-07T22:46:23.697507+00:00",
+    "status": "active",
+    "symbol": "EURUSD",
+    "target_sessions": 3,
+    "trade_summary": {
+      "positions_with_lifetime": 2,
+      "trades_closed": 2,
+      "trades_opened": 2
+    }
+  },
+  "provenance": {},
+  "schema_version": 1
+}

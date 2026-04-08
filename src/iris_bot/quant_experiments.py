@@ -16,8 +16,8 @@ from iris_bot.logging_utils import build_run_directory, configure_logging, write
 from iris_bot.metrics import classification_metrics
 from iris_bot.preprocessing import validate_feature_rows
 from iris_bot.processed_dataset import ProcessedDataset, ProcessedRow, build_processed_dataset
-from iris_bot.splits import TemporalSplit, temporal_train_validation_test_split
-from iris_bot.thresholds import ThresholdSelectionResult, apply_probability_threshold, select_threshold_from_probabilities
+from iris_bot.splits import temporal_train_validation_test_split
+from iris_bot.thresholds import apply_probability_threshold, select_threshold_from_probabilities
 from iris_bot.walk_forward import generate_walk_forward_windows
 from iris_bot.xgb_model import LABEL_TO_CLASS, XGBoostMultiClassModel
 
@@ -60,8 +60,8 @@ _MIN_WF_TEST_ROWS = 5
 class ExperimentSpec:
     experiment_id: str
     hypothesis: str
-    label_overrides: dict[str, object] = field(default_factory=dict)
-    xgb_overrides: dict[str, object] = field(default_factory=dict)
+    label_overrides: dict[str, Any] = field(default_factory=dict)
+    xgb_overrides: dict[str, Any] = field(default_factory=dict)
     model_mode: str = "global"
     selection_block: str = "primary"
 
@@ -77,7 +77,7 @@ class TrainedVariant:
     context_symbols: tuple[str, ...] = ()
     context_timeframes: tuple[str, ...] = ()
     skipped_symbols: dict[str, str] = field(default_factory=dict)
-    training_summary: dict[str, object] = field(default_factory=dict)
+    training_summary: dict[str, Any] = field(default_factory=dict)
 
 
 def _read_env_file(project_root: Path) -> dict[str, str]:
@@ -284,7 +284,7 @@ def _fit_symbol_specific_variant(
 ) -> TrainedVariant:
     models_by_symbol: dict[str, XGBoostMultiClassModel] = {}
     threshold_by_symbol: dict[str, float] = {}
-    per_symbol: dict[str, dict[str, object]] = {}
+    per_symbol: dict[str, dict[str, Any]] = {}
     skipped_symbols: dict[str, str] = {}
     for symbol in sorted({row.symbol for row in train_rows + validation_rows}):
         train_subset = [row for row in train_rows if row.symbol == symbol]
@@ -326,8 +326,8 @@ def _fit_symbol_specific_variant(
             "threshold": asdict(threshold),
             "probability_calibration": model.probability_calibration_metadata(),
         }
-    best_iterations = [payload["best_iteration"] for payload in per_symbol.values() if payload.get("best_iteration") is not None]
-    best_scores = [payload["best_score"] for payload in per_symbol.values() if payload.get("best_score") is not None]
+    best_iterations = [_safe_int(payload["best_iteration"]) for payload in per_symbol.values() if payload.get("best_iteration") is not None]
+    best_scores = [_safe_float(payload["best_score"]) for payload in per_symbol.values() if payload.get("best_score") is not None]
     return TrainedVariant(
         mode="symbol_specific",
         feature_names=list(base_feature_names),
@@ -397,7 +397,7 @@ def _apply_thresholds(trained: TrainedVariant, rows: list[ProcessedRow], probabi
     return apply_probability_threshold(probabilities, trained.threshold)
 
 
-def _group_classification(rows: list[ProcessedRow], predictions: list[int], group_key: str) -> dict[str, object]:
+def _group_classification(rows: list[ProcessedRow], predictions: list[int], group_key: str) -> dict[str, Any]:
     grouped_rows: dict[str, list[int]] = defaultdict(list)
     grouped_preds: dict[str, list[int]] = defaultdict(list)
     for row, prediction in zip(rows, predictions, strict=False):
@@ -421,14 +421,14 @@ def _group_economic(
     settings: Settings,
     trained: TrainedVariant,
     group_key: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     grouped_rows: dict[str, list[ProcessedRow]] = defaultdict(list)
     grouped_probabilities: dict[str, list[dict[int, float]]] = defaultdict(list)
     for row, probability in zip(rows, probabilities, strict=False):
         key = getattr(row, group_key)
         grouped_rows[key].append(row)
         grouped_probabilities[key].append(probability)
-    payload: dict[str, object] = {}
+    payload: dict[str, Any] = {}
     for key in sorted(grouped_rows):
         threshold_by_symbol: dict[str, float] | None = None
         if trained.threshold_by_symbol:
@@ -459,7 +459,7 @@ def _evaluate_split(
     predictions: list[int],
     settings: Settings,
     trained: TrainedVariant,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     labels = [row.label for row in rows]
     threshold_by_symbol = trained.threshold_by_symbol or None
     economic_metrics, _, _ = run_backtest_engine(
@@ -492,11 +492,11 @@ def _evaluate_split(
     }
 
 
-def _variant_collapse_report(result: dict[str, object]) -> dict[str, object]:
-    split_validation = result["splits"]["validation"]  # type: ignore[index]
-    validation_pred = split_validation["prediction_distribution"]  # type: ignore[index]
-    dominant_ratio = max(validation_pred["ratios"].values()) if validation_pred["ratios"] else 0.0  # type: ignore[index]
-    training_summary = result["training_summary"]  # type: ignore[index]
+def _variant_collapse_report(result: dict[str, Any]) -> dict[str, Any]:
+    split_validation = result["splits"]["validation"]
+    validation_pred = split_validation["prediction_distribution"]
+    dominant_ratio = max(validation_pred["ratios"].values()) if validation_pred["ratios"] else 0.0
+    training_summary = result["training_summary"]
     best_iteration = training_summary.get("best_iteration")
     if best_iteration is None:
         best_iteration = ((training_summary.get("aggregate") or {}).get("mean_best_iteration"))
@@ -514,7 +514,7 @@ def _evaluate_walk_forward(
     base_feature_names: list[str],
     settings: Settings,
     spec: ExperimentSpec,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     windows = generate_walk_forward_windows(
         total_rows=len(rows),
         train_window=settings.walk_forward.train_window,
@@ -522,7 +522,7 @@ def _evaluate_walk_forward(
         test_window=settings.walk_forward.test_window,
         step=settings.walk_forward.step,
     )
-    fold_summaries: list[dict[str, object]] = []
+    fold_summaries: list[dict[str, Any]] = []
     for window in windows:
         train_rows = rows[window.train_start : window.train_end]
         validation_rows = rows[window.validation_start : window.validation_end]
@@ -543,7 +543,7 @@ def _evaluate_walk_forward(
         probabilities = _predict_probabilities(trained, test_rows, base_feature_names)
         predictions = _apply_thresholds(trained, test_rows, probabilities)
         split_report = _evaluate_split("test", test_rows, probabilities, predictions, settings, trained)
-        economic = split_report["economic_metrics"]  # type: ignore[index]
+        economic = split_report["economic_metrics"]
         fold_summaries.append(
             {
                 "fold_index": window.fold_index,
@@ -555,8 +555,8 @@ def _evaluate_walk_forward(
                 "profit_factor": economic["profit_factor"],
                 "max_drawdown_usd": economic["max_drawdown_usd"],
                 "expectancy_usd": economic["expectancy_usd"],
-                "no_trade_ratio": split_report["prediction_distribution"]["no_trade_ratio"],  # type: ignore[index]
-                "macro_f1": split_report["classification_metrics"]["macro_f1"],  # type: ignore[index]
+                "no_trade_ratio": split_report["prediction_distribution"]["no_trade_ratio"],
+                "macro_f1": split_report["classification_metrics"]["macro_f1"],
                 "best_iteration": trained.training_summary.get("best_iteration")
                 if "best_iteration" in trained.training_summary
                 else (trained.training_summary.get("aggregate") or {}).get("mean_best_iteration"),
@@ -638,7 +638,7 @@ def _dataset_diagnostics(dataset: ProcessedDataset, rows: list[ProcessedRow]) ->
     }
 
 
-def _evaluate_spec(settings: Settings, spec: ExperimentSpec, run_dir: Path) -> dict[str, object]:
+def _evaluate_spec(settings: Settings, spec: ExperimentSpec, run_dir: Path) -> dict[str, Any]:
     effective_settings, dataset = _build_dataset_for_spec(settings, spec)
     rows = _filter_rows(dataset, effective_settings)
     split = temporal_train_validation_test_split(
@@ -648,13 +648,13 @@ def _evaluate_spec(settings: Settings, spec: ExperimentSpec, run_dir: Path) -> d
         effective_settings.split.test_ratio,
     )
     trained = _fit_variant(split.train, split.validation, effective_settings, dataset.feature_names, mode=spec.model_mode)
-    split_reports: dict[str, object] = {}
+    split_reports: dict[str, Any] = {}
     for split_name, split_rows in (("train", split.train), ("validation", split.validation), ("test", split.test)):
         probabilities = _predict_probabilities(trained, split_rows, dataset.feature_names)
         predictions = _apply_thresholds(trained, split_rows, probabilities)
         split_reports[split_name] = _evaluate_split(split_name, split_rows, probabilities, predictions, effective_settings, trained)
     walk_forward = _evaluate_walk_forward(rows, dataset.feature_names, effective_settings, spec)
-    result = {
+    result: dict[str, Any] = {
         "experiment_id": spec.experiment_id,
         "hypothesis": spec.hypothesis,
         "model_mode": spec.model_mode,
@@ -684,9 +684,9 @@ def _evaluate_spec(settings: Settings, spec: ExperimentSpec, run_dir: Path) -> d
     return result
 
 
-def audit_effective_config_payload(settings: Settings) -> dict[str, object]:
+def audit_effective_config_payload(settings: Settings) -> dict[str, Any]:
     env_file_values = _read_env_file(settings.project_root)
-    resolved: dict[str, object] = {}
+    resolved: dict[str, Any] = {}
     for env_name, section_name, field_name in _CONFIG_FIELDS:
         section = getattr(settings, section_name)
         resolved[env_name] = {
@@ -721,7 +721,7 @@ def audit_effective_config_payload(settings: Settings) -> dict[str, object]:
     }
 
 
-def audit_symbol_context_payload(settings: Settings) -> dict[str, object]:
+def audit_symbol_context_payload(settings: Settings) -> dict[str, Any]:
     baseline_settings, dataset = _build_dataset_for_spec(settings, _baseline_spec())
     rows = _filter_rows(dataset, baseline_settings)
     split = temporal_train_validation_test_split(
@@ -836,12 +836,12 @@ def _primary_specs() -> list[ExperimentSpec]:
     ]
 
 
-def _selection_score(result: dict[str, object], baseline: dict[str, object]) -> tuple[float, float, float, float]:
-    test_metrics = result["splits"]["test"]["economic_metrics"]  # type: ignore[index]
-    baseline_test_metrics = baseline["splits"]["test"]["economic_metrics"]  # type: ignore[index]
-    walk_forward = result["walk_forward"]["aggregate"]  # type: ignore[index]
-    baseline_walk_forward = baseline["walk_forward"]["aggregate"]  # type: ignore[index]
-    collapse = result["collapse_diagnostics"]  # type: ignore[index]
+def _selection_score(result: dict[str, Any], baseline: dict[str, Any]) -> tuple[float, float, float, float]:
+    test_metrics = result["splits"]["test"]["economic_metrics"]
+    baseline_test_metrics = baseline["splits"]["test"]["economic_metrics"]
+    walk_forward = result["walk_forward"]["aggregate"]
+    baseline_walk_forward = baseline["walk_forward"]["aggregate"]
+    collapse = result["collapse_diagnostics"]
     penalty = -1.0 if collapse["detected"] else 0.0
     return (
         penalty + (_safe_float(walk_forward.get("total_net_pnl_usd")) - _safe_float(baseline_walk_forward.get("total_net_pnl_usd"))),
@@ -852,20 +852,20 @@ def _selection_score(result: dict[str, object], baseline: dict[str, object]) -> 
 
 
 def _select_best_result(
-    results: dict[str, dict[str, object]],
-    baseline: dict[str, object],
+    results: dict[str, dict[str, Any]],
+    baseline: dict[str, Any],
     block: str,
-) -> dict[str, object] | None:
+) -> dict[str, Any] | None:
     candidates = [result for result in results.values() if result.get("selection_block") == block]
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: _selection_score(item, baseline), reverse=True)[0]
 
 
-def _combined_spec(base_id: str, best_result: dict[str, object], *, combine: str) -> ExperimentSpec:
-    effective = best_result["effective_config"]  # type: ignore[index]
-    label_overrides: dict[str, object] = {}
-    xgb_overrides: dict[str, object] = {}
+def _combined_spec(base_id: str, best_result: dict[str, Any], *, combine: str) -> ExperimentSpec:
+    effective = best_result["effective_config"]
+    label_overrides: dict[str, Any] = {}
+    xgb_overrides: dict[str, Any] = {}
     model_mode = "global"
     if combine in {"labels_xgb", "labels_context"}:
         label_overrides = {
@@ -873,7 +873,7 @@ def _combined_spec(base_id: str, best_result: dict[str, object], *, combine: str
             "stop_loss_pct": 0.0015,
         }
     if combine == "labels_xgb":
-        xgb = effective["xgboost"]  # type: ignore[index]
+        xgb = effective["xgboost"]
         xgb_overrides = {
             "num_boost_round": xgb["num_boost_round"],
             "early_stopping_rounds": xgb["early_stopping_rounds"],
@@ -894,15 +894,15 @@ def _combined_spec(base_id: str, best_result: dict[str, object], *, combine: str
     )
 
 
-def _delta_vs_baseline(result: dict[str, object], baseline: dict[str, object]) -> dict[str, object]:
-    delta: dict[str, object] = {}
+def _delta_vs_baseline(result: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
     for split_name in ("validation", "test"):
-        current_split = result["splits"][split_name]  # type: ignore[index]
-        baseline_split = baseline["splits"][split_name]  # type: ignore[index]
-        current_classification = current_split["classification_metrics"]  # type: ignore[index]
-        baseline_classification = baseline_split["classification_metrics"]  # type: ignore[index]
-        current_economic = current_split["economic_metrics"]  # type: ignore[index]
-        baseline_economic = baseline_split["economic_metrics"]  # type: ignore[index]
+        current_split = result["splits"][split_name]
+        baseline_split = baseline["splits"][split_name]
+        current_classification = current_split["classification_metrics"]
+        baseline_classification = baseline_split["classification_metrics"]
+        current_economic = current_split["economic_metrics"]
+        baseline_economic = baseline_split["economic_metrics"]
         delta[split_name] = {
             "macro_f1": _safe_float(current_classification.get("macro_f1")) - _safe_float(baseline_classification.get("macro_f1")),
             "balanced_accuracy": _safe_float(current_classification.get("balanced_accuracy")) - _safe_float(baseline_classification.get("balanced_accuracy")),
@@ -915,8 +915,8 @@ def _delta_vs_baseline(result: dict[str, object], baseline: dict[str, object]) -
             "no_trade_ratio": _safe_float(current_split["prediction_distribution"].get("no_trade_ratio"))
             - _safe_float(baseline_split["prediction_distribution"].get("no_trade_ratio")),
         }
-    current_wf = result["walk_forward"]["aggregate"]  # type: ignore[index]
-    baseline_wf = baseline["walk_forward"]["aggregate"]  # type: ignore[index]
+    current_wf = result["walk_forward"]["aggregate"]
+    baseline_wf = baseline["walk_forward"]["aggregate"]
     delta["walk_forward"] = {
         "total_net_pnl_usd": _safe_float(current_wf.get("total_net_pnl_usd")) - _safe_float(baseline_wf.get("total_net_pnl_usd")),
         "mean_profit_factor": _safe_float(current_wf.get("mean_profit_factor")) - _safe_float(baseline_wf.get("mean_profit_factor")),
@@ -926,24 +926,24 @@ def _delta_vs_baseline(result: dict[str, object], baseline: dict[str, object]) -
     return delta
 
 
-def _recommendation(results: dict[str, dict[str, object]], baseline: dict[str, object]) -> dict[str, object]:
+def _recommendation(results: dict[str, dict[str, Any]], baseline: dict[str, Any]) -> dict[str, Any]:
     ranked = sorted(
         (result for result in results.values() if result["experiment_id"] != baseline["experiment_id"]),
         key=lambda item: _selection_score(item, baseline),
         reverse=True,
     )
-    promote_candidates: list[dict[str, object]] = []
+    promote_candidates: list[dict[str, Any]] = []
     for result in ranked:
         delta = _delta_vs_baseline(result, baseline)
-        if result["collapse_diagnostics"]["detected"]:  # type: ignore[index]
+        if result["collapse_diagnostics"]["detected"]:
             continue
-        if delta["test"]["net_pnl_usd"] <= 0.0:  # type: ignore[index]
+        if delta["test"]["net_pnl_usd"] <= 0.0:
             continue
-        if delta["walk_forward"]["total_net_pnl_usd"] <= 0.0:  # type: ignore[index]
+        if delta["walk_forward"]["total_net_pnl_usd"] <= 0.0:
             continue
-        if delta["test"]["profit_factor"] < 0.0:  # type: ignore[index]
+        if delta["test"]["profit_factor"] < 0.0:
             continue
-        if delta["test"]["max_drawdown_usd"] > 0.0:  # type: ignore[index]
+        if delta["test"]["max_drawdown_usd"] > 0.0:
             continue
         promote_candidates.append(result)
 
@@ -995,16 +995,16 @@ def run_experiment_matrix(settings: Settings) -> int:
     symbol_context_report = audit_symbol_context_payload(settings)
     write_json_report(run_dir, "symbol_context_comparison_report.json", symbol_context_report)
 
-    primary_results: dict[str, dict[str, object]] = {}
-    label_diagnostics: dict[str, object] = {}
+    primary_results: dict[str, dict[str, Any]] = {}
+    label_diagnostics: dict[str, Any] = {}
     for spec in _primary_specs():
         logger.info("experiment_matrix running=%s mode=%s", spec.experiment_id, spec.model_mode)
         result = _evaluate_spec(settings, spec, run_dir)
         primary_results[spec.experiment_id] = result
         label_diagnostics[spec.experiment_id] = {
             "hypothesis": spec.hypothesis,
-            "effective_labeling": result["effective_config"]["labeling"],  # type: ignore[index]
-            "dataset": result["dataset"],  # type: ignore[index]
+            "effective_labeling": result["effective_config"]["labeling"],
+            "dataset": result["dataset"],
         }
 
     baseline = primary_results["exp0_baseline"]
@@ -1017,7 +1017,7 @@ def run_experiment_matrix(settings: Settings) -> int:
     if best_context is not None:
         combined_specs.append(_combined_spec("exp6_labels_plus_best_context", best_context, combine="labels_context"))
 
-    combined_results: dict[str, dict[str, object]] = {}
+    combined_results: dict[str, dict[str, Any]] = {}
     for spec in combined_specs:
         logger.info("experiment_matrix running=%s mode=%s", spec.experiment_id, spec.model_mode)
         combined_results[spec.experiment_id] = _evaluate_spec(settings, spec, run_dir)
@@ -1053,12 +1053,12 @@ def run_experiment_matrix(settings: Settings) -> int:
             if experiment_id.startswith("exp3_")
         },
     }
-    per_symbol_report = {
+    per_symbol_report: dict[str, object] = {
         experiment_id: {
-            "validation": result["splits"]["validation"]["per_symbol"],  # type: ignore[index]
-            "test": result["splits"]["test"]["per_symbol"],  # type: ignore[index]
-            "validation_timeframe": result["splits"]["validation"]["per_timeframe"],  # type: ignore[index]
-            "test_timeframe": result["splits"]["test"]["per_timeframe"],  # type: ignore[index]
+            "validation": result["splits"]["validation"]["per_symbol"],
+            "test": result["splits"]["test"]["per_symbol"],
+            "validation_timeframe": result["splits"]["validation"]["per_timeframe"],
+            "test_timeframe": result["splits"]["test"]["per_timeframe"],
         }
         for experiment_id, result in all_results.items()
     }

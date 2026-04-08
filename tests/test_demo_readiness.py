@@ -2,13 +2,13 @@
 Tests for demo_readiness.py — conservative readiness assessment for broker-executing demo.
 
 Covers:
-  - not_ready when approved_demo portfolio is empty
-  - not_ready when lifecycle evidence is missing
-  - not_ready when endurance evidence is missing
-  - not_ready when active_strategy_profiles.json is missing
-  - not_ready when registry is corrupted
-  - caution when evidence store has no lifecycle (advisory only)
-  - ready_for_next_phase only when ALL required checks pass
+  - not_ready_for_demo when approved_demo portfolio is empty
+  - not_ready_for_demo when lifecycle evidence is missing
+  - not_ready_for_demo when endurance evidence is missing
+  - not_ready_for_demo when active_strategy_profiles.json is missing
+  - not_ready_for_demo when quality gate fails
+  - not_ready_for_demo when MT5 ownership is not strict
+  - ready_for_demo_guarded / ready_for_demo_with_reservations only when required checks pass
   - order_send is confirmed NOT integrated
   - No live execution triggered by the assessment
   - Technical debt: no new debt introduced (no bypasses, no shortcuts)
@@ -44,7 +44,55 @@ def _settings(tmp_path: Path, monkeypatch):
     object.__setattr__(settings.data, "runs_dir", runs_dir)
     object.__setattr__(settings.data, "runtime_dir", runtime_dir)
     object.__setattr__(settings.experiment, "_processed_dir", processed_dir)
+    object.__setattr__(settings.mt5, "ownership_mode", "strict")
     return settings
+
+
+def _patch_quality_gate(monkeypatch, *, ok: bool = True, reason: str = "ok") -> None:
+    monkeypatch.setattr(
+        "iris_bot.demo_readiness._check_official_suite",
+        lambda _settings: {
+            "ok": ok,
+            "reason": reason,
+            "official_source": "test_fixture",
+            "commands": {},
+            "failed_commands": [] if ok else ["pytest"],
+        },
+    )
+    monkeypatch.setattr(
+        "iris_bot.demo_readiness._check_evidence_store",
+        lambda _settings: {
+            "ok": True,
+            "reason": "ok",
+            "has_lifecycle_evidence": True,
+            "has_stability_evidence": True,
+            "integrity_ok": True,
+            "manifest_valid": True,
+            "conflict_policy": "test",
+            "retention_policy": "test",
+            "tombstone_count": 0,
+            "integrity_failures": [],
+            "total_entries": 2,
+        },
+    )
+    monkeypatch.setattr(
+        "iris_bot.demo_readiness._check_artifact_provenance",
+        lambda _settings: {
+            "ok": True,
+            "reason": "ok",
+            "blocking_artifacts": [],
+            "artifacts": {
+                "experiment_report": {"ok": True},
+                "backtest_report": {"ok": True},
+                "active_strategy_profiles": {"ok": True},
+                "operational_config": {
+                    "ok": False,
+                    "reason": "missing_paper_or_demo_dry_operational_artifact",
+                    "advisory": True,
+                },
+            },
+        },
+    )
 
 
 def _write_validated_profile(settings, symbol: str) -> None:
@@ -148,34 +196,38 @@ def _make_approved_demo_registry(settings, symbol: str) -> None:
 def test_not_ready_empty_portfolio(tmp_path, monkeypatch):
     """No approved_demo symbols → not_ready."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     report = generate_demo_execution_readiness_report(settings)
-    assert report["decision"] == "not_ready"
+    assert report["decision"] == "not_ready_for_demo"
     assert report["order_send_integrated"] is False
 
 
 def test_not_ready_missing_lifecycle(tmp_path, monkeypatch):
     """Approved_demo profile but no lifecycle evidence → not_ready."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     _make_approved_demo_registry(settings, "EURUSD")
     _write_endurance(settings, "EURUSD")
     report = generate_demo_execution_readiness_report(settings)
-    assert report["decision"] == "not_ready"
+    assert report["decision"] == "not_ready_for_demo"
     assert "lifecycle_evidence" in report["failed_required_checks"]
 
 
 def test_not_ready_missing_endurance(tmp_path, monkeypatch):
     """Approved_demo profile but no endurance evidence → not_ready."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     _make_approved_demo_registry(settings, "EURUSD")
     _write_lifecycle(settings, "EURUSD")
     report = generate_demo_execution_readiness_report(settings)
-    assert report["decision"] == "not_ready"
+    assert report["decision"] == "not_ready_for_demo"
     assert "endurance_evidence" in report["failed_required_checks"]
 
 
 def test_not_ready_missing_active_materialization(tmp_path, monkeypatch):
     """No active_strategy_profiles.json → not_ready."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     _make_approved_demo_registry(settings, "EURUSD")
     _write_lifecycle(settings, "EURUSD")
     _write_endurance(settings, "EURUSD")
@@ -185,7 +237,7 @@ def test_not_ready_missing_active_materialization(tmp_path, monkeypatch):
     if active_path.exists():
         active_path.unlink()
     report = generate_demo_execution_readiness_report(settings)
-    assert report["decision"] == "not_ready"
+    assert report["decision"] == "not_ready_for_demo"
     assert "active_materialization" in report["failed_required_checks"]
 
 
@@ -194,6 +246,7 @@ def test_not_ready_missing_active_materialization(tmp_path, monkeypatch):
 def test_order_send_never_integrated(tmp_path, monkeypatch):
     """order_send_integrated must always be False in this phase."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     report = generate_demo_execution_readiness_report(settings)
     assert report["order_send_integrated"] is False
 
@@ -201,6 +254,7 @@ def test_order_send_never_integrated(tmp_path, monkeypatch):
 def test_no_real_execution_triggered(tmp_path, monkeypatch):
     """Running the readiness assessment must not trigger any MT5 connection or execution."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     # Just running the assessment must complete without errors and without MT5 calls
     _make_approved_demo_registry(settings, "EURUSD")
     report = generate_demo_execution_readiness_report(settings)
@@ -213,14 +267,14 @@ def test_no_real_execution_triggered(tmp_path, monkeypatch):
 # --- Ready case ---
 
 def test_ready_when_all_checks_pass(tmp_path, monkeypatch):
-    """ready_for_next_phase when all required checks pass."""
+    """guarded or reserved readiness when all required checks pass."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     _make_approved_demo_registry(settings, "EURUSD")
     _write_lifecycle(settings, "EURUSD")
     _write_endurance(settings, "EURUSD")
     report = generate_demo_execution_readiness_report(settings)
-    # Caution is ok (evidence_store may be empty = advisory); ready is also ok
-    assert report["decision"] in ("ready_for_next_phase", "caution")
+    assert report["decision"] in ("ready_for_demo_guarded", "ready_for_demo_with_reservations")
     assert report["order_send_integrated"] is False
 
 
@@ -229,25 +283,29 @@ def test_ready_when_all_checks_pass(tmp_path, monkeypatch):
 def test_default_decision_is_not_ready(tmp_path, monkeypatch):
     """With no setup at all, the default must be not_ready (conservative)."""
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     report = generate_demo_execution_readiness_report(settings)
-    assert report["decision"] == "not_ready"
+    assert report["decision"] == "not_ready_for_demo"
 
 
 # --- Report structure ---
 
 def test_report_structure_complete(tmp_path, monkeypatch):
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     report = generate_demo_execution_readiness_report(settings)
     required_fields = [
-        "decision", "ready_for_next_phase", "failed_required_checks",
+        "decision", "ready_for_demo", "failed_required_checks",
         "failed_advisory_checks", "blocking_reasons", "advisory_reasons",
         "checks", "phase_note", "order_send_integrated", "generated_at",
+        "blockers", "warnings", "recommendation_next_step",
     ]
     for f in required_fields:
         assert f in report, f"Missing field: {f}"
     required_check_keys = [
-        "registry_integrity", "lifecycle_evidence", "endurance_evidence",
-        "active_materialization", "approved_demo_portfolio", "no_order_send",
+        "official_quality_gate", "registry_integrity", "lifecycle_evidence", "endurance_evidence",
+        "active_materialization", "approved_demo_portfolio", "governance_policy",
+        "artifact_provenance", "mt5_ownership_policy", "no_order_send", "evidence_store",
     ]
     for k in required_check_keys:
         assert k in report["checks"], f"Missing check: {k}"
@@ -259,6 +317,7 @@ def test_technical_debt_avoidance_no_bypasses(tmp_path, monkeypatch):
     This is a meta-test ensuring no technical debt was introduced.
     """
     settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
     report = generate_demo_execution_readiness_report(settings)
     # order_send must never be True
     assert report["order_send_integrated"] is False
@@ -266,3 +325,46 @@ def test_technical_debt_avoidance_no_bypasses(tmp_path, monkeypatch):
     for check_name, check in report["checks"].items():
         reason = check.get("reason", "")
         assert "bypass" not in reason.lower(), f"Check {check_name} has bypass: {reason}"
+
+
+def test_not_ready_when_official_quality_gate_fails(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch, ok=False, reason="official_quality_gate_failed")
+    _make_approved_demo_registry(settings, "EURUSD")
+    _write_lifecycle(settings, "EURUSD")
+    _write_endurance(settings, "EURUSD")
+    report = generate_demo_execution_readiness_report(settings)
+    assert report["decision"] == "not_ready_for_demo"
+    assert "official_quality_gate" in report["failed_required_checks"]
+
+
+def test_not_ready_when_mt5_ownership_mode_is_not_strict(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
+    _make_approved_demo_registry(settings, "EURUSD")
+    _write_lifecycle(settings, "EURUSD")
+    _write_endurance(settings, "EURUSD")
+    object.__setattr__(settings.mt5, "ownership_mode", "compatibility")
+    report = generate_demo_execution_readiness_report(settings)
+    assert report["decision"] == "not_ready_for_demo"
+    assert "mt5_ownership_policy" in report["failed_required_checks"]
+
+
+def test_not_ready_when_artifact_provenance_is_incomplete(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    _patch_quality_gate(monkeypatch)
+    _make_approved_demo_registry(settings, "EURUSD")
+    _write_lifecycle(settings, "EURUSD")
+    _write_endurance(settings, "EURUSD")
+    monkeypatch.setattr(
+        "iris_bot.demo_readiness._check_artifact_provenance",
+        lambda _settings: {
+            "ok": False,
+            "reason": "artifact_provenance_incomplete",
+            "blocking_artifacts": ["backtest_report"],
+            "artifacts": {"backtest_report": {"ok": False, "reason": "missing_backtest_report"}},
+        },
+    )
+    report = generate_demo_execution_readiness_report(settings)
+    assert report["decision"] == "not_ready_for_demo"
+    assert "artifact_provenance" in report["failed_required_checks"]

@@ -1,10 +1,11 @@
 {
   "artifact_type": "model_artifact_manifest",
-  "checksum": "28a1e2279925359b253038dc764275e2c2ffdb36cea8b2a2a0ae7262b3be8720",
+  "artifact_version": "model_artifact_manifest.v1",
+  "checksum": "4ba7cbfda0ea9121f135073c7a73b333e91df4066eccf64d12aad331b455018d",
   "compatibility": {
     "loader": "load_model_artifact_manifest"
   },
-  "generated_at": "2026-04-06T04:39:47.749169+00:00",
+  "generated_at": "2026-04-06T23:09:37.013288+00:00",
   "payload": {
     "base_profile_snapshot": {
       "allow_long": true,
@@ -42,25 +43,25 @@
     },
     "evaluation_summary": {
       "test": {
-        "expectancy_usd": -2.220005673229051,
-        "max_drawdown_usd": 79.01019856301741,
-        "net_pnl_usd": -77.70019856301678,
-        "no_trade_ratio": 0.32432432432432434,
-        "profit_factor": 0.4620599593491063,
+        "expectancy_usd": -0.7016342253914153,
+        "max_drawdown_usd": 50.51831479026896,
+        "net_pnl_usd": -27.363734790265198,
+        "no_trade_ratio": 0.2635135135135135,
+        "profit_factor": 0.7790753913739108,
         "row_count": 296,
         "threshold": 0.4,
-        "trade_count": 35
+        "trade_count": 39
       },
       "walk_forward": {
-        "mean_expectancy_usd": -1.6778725641594967,
-        "mean_no_trade_ratio": 0.19464285714285715,
-        "mean_profit_factor": 0.7637447996279338,
-        "net_pnl_stddev": 29.3823193585616,
-        "total_net_pnl_usd": -234.3704426586977,
-        "worst_fold_drawdown_usd": 57.165572513584266
+        "mean_expectancy_usd": -1.6050044923009688,
+        "mean_no_trade_ratio": 0.25357142857142856,
+        "mean_profit_factor": 0.7056888226746211,
+        "net_pnl_stddev": 30.619462441002963,
+        "total_net_pnl_usd": -258.54186622439147,
+        "worst_fold_drawdown_usd": 84.52520599630873
       }
     },
-    "feature_count": 32,
+    "feature_count": 36,
     "feature_names": [
       "return_1",
       "return_3",
@@ -88,6 +89,10 @@
       "volume_zscore_20",
       "volume_percentile_20",
       "atr_regime_percentile",
+      "adx_14",
+      "trend_regime_flag",
+      "high_volatility_regime_flag",
+      "low_volatility_regime_flag",
       "session_asia",
       "session_london",
       "session_new_york",
@@ -96,9 +101,9 @@
       "currency_strength_rank"
     ],
     "metadata_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/AUDUSD/xgboost_metadata.json",
-    "metadata_sha256": "08a16dc335ecc85724f00bd41f60045f19b13da74d2e847f921ddb022923c4fb",
+    "metadata_sha256": "4620928732dd1dd6b5c418727fcf98e817f6062b934c3a7b1a6dad4c73d15fe5",
     "model_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/AUDUSD/xgboost_model.json",
-    "model_sha256": "7f5dbd1e54261b8b12d8bd9de9379ca8fb9bb71b60b88292c43493860add2958",
+    "model_sha256": "c4ae1309adf2593ae64cfaa0f0caaa30cedd4a5993e649e8ad9e4399fe3c4811",
     "model_variant": "symbol_specific",
     "runtime_compatibility": {
       "primary_timeframe": "M15",
@@ -110,7 +115,8 @@
     "symbol": "AUDUSD",
     "threshold": 0.4,
     "threshold_metric": "macro_f1",
-    "threshold_value": 0.3770764855174229
+    "threshold_value": 0.358024841777507
   },
+  "provenance": {},
   "schema_version": 1
 }

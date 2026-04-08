@@ -368,6 +368,188 @@ def run_chaos_scenario(settings: Settings, mode: str, require_broker: bool) -> t
     return run_soak(settings, mode, require_broker)
 
 
+# ---------------------------------------------------------------------------
+# BLOQUE 4 — Demo-Guarded Soak
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DemoGuardedSoakSummary:
+    cycles_requested: int
+    cycles_completed: int
+    restore_events: int
+    restore_failures: int
+    reconcile_events: int
+    reconcile_failures: int
+    blocked_trade_events: int
+    critical_alerts: int
+    warning_alerts: int
+    circuit_breaker_triggers: int
+    no_go_cycles: int
+    overall_decision: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def run_demo_guarded_soak(
+    settings: Settings,
+    mode: str = "paper",
+    require_broker: bool = False,
+    base_client_factory: Callable[[], MT5Client] | None = None,
+    allowed_profile_states: set[str] | None = None,
+) -> tuple[int, Path]:
+    """Demo-guarded soak: enforces stricter audit than standard soak.
+
+    In addition to standard soak artifacts it accumulates:
+    - restore_events / restore_failures per cycle
+    - reconcile_events / reconcile_failures per cycle
+    - blocked_trade_events per cycle
+    - circuit_breaker_triggers (currently from critical alerts)
+    - no_go_cycles count
+    - DemoGuardedSoakSummary as a first-class artifact
+
+    Returns: (exit_code, run_dir)
+    exit_code: 0=go, 2=caution, 3=no_go
+    """
+    command_name = "demo_guarded_paper_soak" if mode == "paper" else "demo_guarded_soak"
+    run_dir = build_run_directory(settings.data.runs_dir, command_name)
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
+    cycle_summaries_dir = run_dir / "cycle_summaries"
+    cycle_summaries_dir.mkdir(parents=True, exist_ok=True)
+
+    incidents: list[dict[str, Any]] = []
+    cycle_health: list[CycleHealth] = []
+    cycle_dirs: list[Path] = []
+
+    # Counters for demo-guarded summary
+    restore_events = 0
+    restore_failures = 0
+    reconcile_events = 0
+    reconcile_failures = 0
+    blocked_trade_events = 0
+    critical_alert_total = 0
+    warning_alert_total = 0
+    circuit_breaker_triggers = 0
+    no_go_cycles = 0
+
+    runtime_state_path = build_runtime_state_path(settings)
+    if not settings.soak.restore_between_cycles and runtime_state_path.exists():
+        runtime_state_path.unlink()
+
+    for cycle in range(1, settings.soak.cycles + 1):
+        if settings.soak.pause_seconds > 0:
+            time.sleep(settings.soak.pause_seconds)
+
+        client_factory: Callable[[], MT5Client] | None = base_client_factory
+        exit_code, cycle_dir = run_resilient_session(
+            settings,
+            mode,
+            require_broker,
+            client_factory=client_factory,
+            allowed_profile_states=allowed_profile_states,
+        )
+        cycle_dirs.append(cycle_dir)
+        health = _cycle_health(cycle, cycle_dir)
+        cycle_health.append(health)
+
+        # Accumulate demo-guarded metrics
+        restore_events += 1
+        if not health.restore_ok:
+            restore_failures += 1
+
+        reconcile_events += 1
+        if not health.reconciliation_ok:
+            reconcile_failures += 1
+
+        blocked_trade_events += sum(
+            1 for issue in health.issues if "blocked" in issue or "rejection" in issue
+        )
+        critical_alert_total += health.alerts_by_severity.get("critical", 0)
+        warning_alert_total += health.alerts_by_severity.get("warning", 0)
+
+        # Circuit breaker: any critical alert is a trigger
+        if health.alerts_by_severity.get("critical", 0) > 0:
+            circuit_breaker_triggers += 1
+            incidents.append({
+                "cycle": cycle,
+                "category": "circuit_breaker_trigger",
+                "severity": "critical",
+                "alerts": health.alerts_by_severity,
+            })
+
+        if health.status == "no_go":
+            no_go_cycles += 1
+            incidents.append({
+                "cycle": cycle,
+                "category": "no_go_cycle",
+                "severity": "critical",
+                "issues": health.issues,
+            })
+
+        write_json(
+            cycle_summaries_dir / f"cycle_{cycle:02d}.json",
+            {
+                "run_dir": str(cycle_dir),
+                **health.to_dict(),
+                "exit_code": exit_code,
+                "restore_ok": health.restore_ok,
+                "reconciliation_ok": health.reconciliation_ok,
+            },
+        )
+
+    decision_obj = classify_go_no_go(cycle_health)
+    summary = DemoGuardedSoakSummary(
+        cycles_requested=settings.soak.cycles,
+        cycles_completed=len(cycle_health),
+        restore_events=restore_events,
+        restore_failures=restore_failures,
+        reconcile_events=reconcile_events,
+        reconcile_failures=reconcile_failures,
+        blocked_trade_events=blocked_trade_events,
+        critical_alerts=critical_alert_total,
+        warning_alerts=warning_alert_total,
+        circuit_breaker_triggers=circuit_breaker_triggers,
+        no_go_cycles=no_go_cycles,
+        overall_decision=decision_obj.decision,
+    )
+
+    write_json(run_dir / "demo_guarded_soak_summary.json", summary.to_dict())
+    write_json(run_dir / "soak_report.json", {
+        "mode": mode,
+        "soak_type": "demo_guarded",
+        "cycles_requested": settings.soak.cycles,
+        "cycles_completed": len(cycle_health),
+        "cycle_run_dirs": [str(p) for p in cycle_dirs],
+    })
+    write_json(run_dir / "health_report.json", {"cycles": [h.to_dict() for h in cycle_health]})
+    write_json(run_dir / "go_no_go_report.json", decision_obj.to_dict())
+    _incident_log(run_dir, incidents)
+
+    # Aggregate CSVs from cycle dirs
+    _aggregate_csv(run_dir / "execution_journal.csv", [p / "execution_journal.csv" for p in cycle_dirs])
+    _aggregate_csv(run_dir / "signal_log.csv", [p / "signal_log.csv" for p in cycle_dirs])
+    _aggregate_csv(run_dir / "closed_trades.csv", [p / "closed_trades.csv" for p in cycle_dirs])
+
+    if cycle_dirs:
+        for filename in ("open_positions_snapshot.json", "run_report.json", "validation_report.json", "operational_status.json", "reconciliation_report.json", "restore_state_report.json"):
+            src = cycle_dirs[-1] / filename
+            if src.exists():
+                shutil.copyfile(src, run_dir / filename)
+        all_alerts: list[dict[str, Any]] = []
+        for cd in cycle_dirs:
+            all_alerts.extend(_read_alerts(cd / "alerts_log.jsonl"))
+        with (run_dir / "alerts_log.jsonl").open("w", encoding="utf-8") as fh:
+            for alert in all_alerts:
+                fh.write(json.dumps(alert, sort_keys=True))
+                fh.write("\n")
+
+    logger.info(
+        "demo_guarded_soak complete mode=%s decision=%s cycles=%s restore_fail=%s reconcile_fail=%s",
+        mode, decision_obj.decision, len(cycle_health), restore_failures, reconcile_failures,
+    )
+    return (0 if decision_obj.decision == "go" else 2 if decision_obj.decision == "caution" else 3), run_dir
+
+
 def regenerate_go_no_go_report(settings: Settings) -> tuple[int, Path]:
     candidates = sorted(list(settings.data.runs_dir.glob("*_paper_soak")) + list(settings.data.runs_dir.glob("*_demo_dry_soak")))
     if not candidates:

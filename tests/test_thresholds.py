@@ -1,7 +1,5 @@
-import pytest
 
 from iris_bot.thresholds import (
-    ThresholdSelectionResult,
     _refined_grid,
     select_threshold_from_probabilities,
     select_threshold_from_scores,

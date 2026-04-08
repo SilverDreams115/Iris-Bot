@@ -18,6 +18,12 @@ from iris_bot.runtime_provenance import load_runtime_provenance_from_env
 
 
 SUPPORTED_MT5_RESEARCH_COMMANDS = (
+    "mt5-check",
+    "run-demo-live-probe",
+    "demo-execution-preflight",
+    "activate-demo-execution",
+    "run-demo-execution",
+    "reconcile-lifecycle",
     "fetch-extended-history",
     "audit-regime-features",
     "run-regime-aware-rework",
@@ -183,6 +189,14 @@ def _prepare_run_dir(run_id: str) -> Path:
     return run_dir
 
 
+def _delegated_run_suffix(command: str) -> str:
+    explicit_suffixes = {
+        "run-demo-live-probe": "demo_live_probe",
+        "reconcile-lifecycle": "lifecycle_reconciliation",
+    }
+    return explicit_suffixes.get(command, command.replace("-", "_"))
+
+
 def _latest_matching_run(runs_dir: Path, suffix: str, before: set[str]) -> str | None:
     candidates = sorted(path.name for path in runs_dir.glob(f"*_{suffix}"))
     for candidate in reversed(candidates):
@@ -247,7 +261,7 @@ def run_runtime(command: str, run_id: str) -> int:
         return 2
 
     runs_before = {path.name for path in settings.data.runs_dir.iterdir() if path.is_dir()}
-    suffix = command.replace("-", "_")
+    suffix = _delegated_run_suffix(command)
     handlers = build_command_handlers()
     exit_code = run_cli_command(command=command, settings=settings, command_handlers=handlers)
     delegated_run_dir = _latest_matching_run(settings.data.runs_dir, suffix, runs_before)

@@ -29,6 +29,7 @@ from iris_bot.operational import (
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.resilient import (
     BrokerStateSnapshot,
+    broker_snapshot_from_mt5,
     build_runtime_state_path,
     classify_broker_event,
     emit_alert,
@@ -150,6 +151,36 @@ def test_soft_and_hard_reconciliation_paths() -> None:
     hard = reconcile_state(_state_with_position(), broker, ReconciliationConfig(policy="hard_fail", price_tolerance=0.0001, volume_tolerance=0.000001))
     assert soft.action == "soft_resync"
     assert hard.action == "hard_fail"
+
+
+def test_broker_snapshot_conversion_does_not_promote_audit_visible_scope_only_records() -> None:
+    raw_snapshot = BrokerSnapshot(
+        True,
+        {"balance": 1000.0, "equity": 1000.0},
+        [],
+        [],
+        [],
+        {
+            "ownership_filter_active": True,
+            "ownership_mode": "strict",
+            "ownership_policy_version": 1,
+            "audit_visible_positions": [
+                {
+                    "symbol": "EURUSD",
+                    "ticket": 999,
+                    "owned_by_bot": False,
+                    "in_symbol_scope": True,
+                    "visible_for_audit": True,
+                    "ownership_reason": "symbol_scope_only",
+                }
+            ],
+        },
+    )
+
+    broker = broker_snapshot_from_mt5(raw_snapshot)
+
+    assert broker.positions == []
+    assert broker.scope_report["audit_visible_positions"][0]["ownership_reason"] == "symbol_scope_only"
 
 
 def test_reconnect_success_and_failure() -> None:

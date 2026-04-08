@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: scripts/run_mt5_research_windows.sh <validate-runtime|fetch-extended-history|audit-regime-features|run-regime-aware-rework|compare-regime-experiments|evaluate-demo-candidate>" >&2
+  echo "usage: scripts/run_mt5_research_windows.sh <validate-runtime|mt5-check|run-demo-live-probe|demo-execution-preflight|activate-demo-execution|run-demo-execution|reconcile-lifecycle|fetch-extended-history|audit-regime-features|run-regime-aware-rework|compare-regime-experiments|evaluate-demo-candidate>" >&2
   exit 2
 fi
 
 COMMAND="$1"
 case "$COMMAND" in
-  validate-runtime|fetch-extended-history|audit-regime-features|run-regime-aware-rework|compare-regime-experiments|evaluate-demo-candidate) ;;
+  validate-runtime|mt5-check|run-demo-live-probe|demo-execution-preflight|activate-demo-execution|run-demo-execution|reconcile-lifecycle|fetch-extended-history|audit-regime-features|run-regime-aware-rework|compare-regime-experiments|evaluate-demo-candidate) ;;
   *)
     echo "unsupported MT5 research command: $COMMAND" >&2
     exit 2
@@ -16,9 +16,11 @@ case "$COMMAND" in
 esac
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WINDOWS_WORKSPACE_WIN="${IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE:-C:\\Temp\\IRIS-Bot-mt5-runtime\\workspace}"
-WINDOWS_WORKSPACE_WSL="${IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE_WSL:-/mnt/c/Temp/IRIS-Bot-mt5-runtime/workspace}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+WINDOWS_WORKSPACE_ROOT_WIN="${IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE:-C:\\Temp\\IRIS-Bot-mt5-runtime}"
+WINDOWS_WORKSPACE_ROOT_WSL="${IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE_WSL:-/mnt/c/Temp/IRIS-Bot-mt5-runtime}"
+WINDOWS_WORKSPACE_WIN="$WINDOWS_WORKSPACE_ROOT_WIN\\workspace\\$RUN_ID"
+WINDOWS_WORKSPACE_WSL="$WINDOWS_WORKSPACE_ROOT_WSL/workspace/$RUN_ID"
 LOCK_FILE="$PROJECT_ROOT/.mt5_research_windows.lock"
 
 exec 9>"$LOCK_FILE"
@@ -84,21 +86,30 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(wrap_artifact("mt5_research_runtime_report", payload), handle, indent=2, sort_keys=True)
 PY
 
-"$PROJECT_ROOT/.venv/bin/python" - <<'PY'
-import os
-import shutil
-workspace = os.environ["IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE_WSL"]
-if os.path.exists(workspace):
-    shutil.rmtree(workspace)
-os.makedirs(workspace, exist_ok=True)
-PY
+mkdir -p "$WINDOWS_WORKSPACE_WSL"
 cp -r "$PROJECT_ROOT/src" "$WINDOWS_WORKSPACE_WSL/"
+cp -r "$PROJECT_ROOT/config" "$WINDOWS_WORKSPACE_WSL/"
 cp -r "$PROJECT_ROOT/data/raw" "$WINDOWS_WORKSPACE_WSL/data_raw"
 cp -r "$PROJECT_ROOT/data/processed" "$WINDOWS_WORKSPACE_WSL/data_processed"
+cp -r "$PROJECT_ROOT/data/runtime" "$WINDOWS_WORKSPACE_WSL/data_runtime"
 cp "$PROJECT_ROOT/pyproject.toml" "$WINDOWS_WORKSPACE_WSL/"
 if [[ -f "$PROJECT_ROOT/.env" ]]; then
   cp "$PROJECT_ROOT/.env" "$WINDOWS_WORKSPACE_WSL/"
 fi
+touch "$WINDOWS_WORKSPACE_WSL/.env"
+for passthrough_var in \
+  IRIS_MT5_ENABLED \
+  IRIS_MT5_LOGIN \
+  IRIS_MT5_PASSWORD \
+  IRIS_MT5_SERVER \
+  IRIS_MT5_PATH \
+  IRIS_DEMO_EXECUTION_ENABLED \
+  IRIS_DEMO_EXECUTION_TARGET_SYMBOL
+do
+  if [[ -n "${!passthrough_var:-}" ]]; then
+    printf '%s=%s\n' "$passthrough_var" "${!passthrough_var}" >> "$WINDOWS_WORKSPACE_WSL/.env"
+  fi
+done
 "$PROJECT_ROOT/.venv/bin/python" - <<'PY'
 import os
 import shutil
@@ -106,15 +117,26 @@ workspace = os.environ["IRIS_MT5_RESEARCH_WINDOWS_WORKSPACE_WSL"]
 os.makedirs(os.path.join(workspace, "data"), exist_ok=True)
 src_raw = os.path.join(workspace, "data_raw")
 src_processed = os.path.join(workspace, "data_processed")
+src_runtime = os.path.join(workspace, "data_runtime")
 dst_raw = os.path.join(workspace, "data", "raw")
 dst_processed = os.path.join(workspace, "data", "processed")
+dst_runtime = os.path.join(workspace, "data", "runtime")
 if os.path.exists(dst_raw):
     shutil.rmtree(dst_raw)
 if os.path.exists(dst_processed):
     shutil.rmtree(dst_processed)
+if os.path.exists(dst_runtime):
+    shutil.rmtree(dst_runtime)
 shutil.move(src_raw, dst_raw)
 shutil.move(src_processed, dst_processed)
+shutil.move(src_runtime, dst_runtime)
 for suffix in (
+    "_mt5_check",
+    "_run_demo_live_probe",
+    "_demo_execution_preflight",
+    "_activate_demo_execution",
+    "_run_demo_execution",
+    "_lifecycle_reconciliation",
     "_run_regime_aware_rework",
     "_audit_regime_features",
     "_fetch_extended_history",
@@ -158,9 +180,9 @@ if [[ "$COMMAND" == "validate-runtime" ]]; then
   WINDOWS_DELEGATED_COMMAND="fetch-extended-history"
 fi
 
-WINDOWS_EXEC_SCRIPT="\$env:PYTHONPATH = '$WINDOWS_WORKSPACE_WIN\\src'; \$env:IRIS_MT5_RESEARCH_PROVENANCE_JSON = '$RUNTIME_PROVENANCE_JSON'; Set-Location '$WINDOWS_WORKSPACE_WIN'; python -m iris_bot.mt5_research_runtime $WINDOWS_RUN_MODE --delegated-command '$WINDOWS_DELEGATED_COMMAND' --run-id '$RUN_ID'"
+WINDOWS_EXEC_SCRIPT="set PYTHONPATH=$WINDOWS_WORKSPACE_WIN\\src && cd /d $WINDOWS_WORKSPACE_WIN && python -m iris_bot.mt5_research_runtime $WINDOWS_RUN_MODE --delegated-command $WINDOWS_DELEGATED_COMMAND --run-id $RUN_ID"
 set +e
-powershell.exe -NoProfile -Command "$WINDOWS_EXEC_SCRIPT"
+cmd.exe /c "$WINDOWS_EXEC_SCRIPT"
 WINDOWS_EXIT_CODE=$?
 set -e
 
@@ -191,6 +213,13 @@ if [[ -n "$DELEGATED_RUN_DIR" ]]; then
 fi
 if [[ "$COMMAND" == "fetch-extended-history" ]]; then
   SYNC_ITEMS+=("data/raw/market_extended.csv" "data/raw/market_extended.csv.metadata.json")
+fi
+if [[ "$COMMAND" == "activate-demo-execution" ]]; then
+  SYNC_ITEMS+=("data/runtime/demo_execution_registry.json")
+fi
+if [[ "$COMMAND" == "run-demo-execution" ]]; then
+  SYNC_ITEMS+=("data/runtime/demo_forward_validation/demo_session_series_registry.json")
+  SYNC_ITEMS+=("data/runtime/runtime_state.json")
 fi
 
 SYNC_JOINED=""
@@ -228,6 +257,44 @@ export EXEC_RUN_DIR
 export DELEGATED_RUN_DIR
 export WINDOWS_EXIT_CODE
 export DELEGATED_EXIT_CODE
+export COMMAND
+
+# Post-sync: normalize Windows paths in demo_session_series_registry.json to WSL paths
+"$PROJECT_ROOT/.venv/bin/python" - <<'PY'
+import json
+import os
+import re
+from pathlib import Path
+
+command = os.environ.get("COMMAND", "")
+project_root = Path(os.environ["IRIS_MT5_RESEARCH_PROJECT_ROOT"])
+
+if command == "run-demo-execution":
+    reg_path = project_root / "data" / "runtime" / "demo_forward_validation" / "demo_session_series_registry.json"
+    if reg_path.exists():
+        raw = json.loads(reg_path.read_text(encoding="utf-8"))
+        payload = raw.get("payload", raw)
+        changed = False
+        for sid, series in payload.get("series", {}).items():
+            for field in ("session_evidence_paths", "session_review_paths"):
+                fixed = []
+                for p in series.get(field, []):
+                    if "\\" in p or "C:" in p:
+                        normalized = p.replace("\\", "/")
+                        m = re.search(r"(\d{8}T\d{6}Z_run_demo_execution)", normalized)
+                        if m:
+                            rd = m.group(1)
+                            fn = normalized.split("/")[-1]
+                            local = str(project_root / "runs" / rd / fn)
+                            fixed.append(local)
+                            changed = True
+                            continue
+                    fixed.append(p)
+                series[field] = fixed
+        if changed:
+            reg_path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+PY
+
 "$PROJECT_ROOT/.venv/bin/python" - <<'PY'
 import json
 import os

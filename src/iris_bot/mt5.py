@@ -91,6 +91,17 @@ class BrokerSnapshot:
 
 
 @dataclass(frozen=True)
+class OwnershipDecision:
+    owned_by_bot: bool
+    in_symbol_scope: bool
+    visible_for_audit: bool
+    ownership_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MT5SessionHealth:
     ok: bool
     connected: bool
@@ -260,35 +271,64 @@ class MT5Client:
 
     def broker_state_snapshot(self, symbols: tuple[str, ...]) -> BrokerSnapshot:
         if not self.ensure_connection():
-            return BrokerSnapshot(False, {}, [], [], [], {"ownership_filter_active": False, "ignored_positions": 0, "ignored_orders": 0, "ignored_closed_trades": 0})
+            return BrokerSnapshot(
+                False,
+                {},
+                [],
+                [],
+                [],
+                {
+                    "ownership_filter_active": False,
+                    "ownership_mode": self.config.ownership_mode,
+                    "ownership_policy_version": 1,
+                    "ignored_positions": 0,
+                    "ignored_orders": 0,
+                    "ignored_closed_trades": 0,
+                    "audit_visible_positions": [],
+                    "audit_visible_orders": [],
+                    "audit_visible_closed_trades": [],
+                },
+            )
         assert self._mt5 is not None
         account_info = self.account_info() or {}
         raw_positions = self._mt5.positions_get() if hasattr(self._mt5, "positions_get") else []
         positions = []
         ignored_positions = 0
+        audit_visible_positions: list[dict[str, Any]] = []
         for item in raw_positions or []:
             data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-            if self._is_owned_record(data, symbols):
-                positions.append(data)
+            decision = self._classify_record_ownership(data, symbols)
+            if decision.visible_for_audit:
+                audit_visible_positions.append(self._with_ownership_metadata(data, decision))
+            if decision.owned_by_bot:
+                positions.append(self._with_ownership_metadata(data, decision))
             else:
                 ignored_positions += 1
         raw_orders = self._mt5.orders_get() if hasattr(self._mt5, "orders_get") else []
         pending_orders = []
         ignored_orders = 0
+        audit_visible_orders: list[dict[str, Any]] = []
         for item in raw_orders or []:
             data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-            if self._is_owned_record(data, symbols):
-                pending_orders.append(data)
+            decision = self._classify_record_ownership(data, symbols)
+            if decision.visible_for_audit:
+                audit_visible_orders.append(self._with_ownership_metadata(data, decision))
+            if decision.owned_by_bot:
+                pending_orders.append(self._with_ownership_metadata(data, decision))
             else:
                 ignored_orders += 1
         closed_trades: list[dict[str, Any]] = []
         ignored_closed_trades = 0
+        audit_visible_closed_trades: list[dict[str, Any]] = []
         if hasattr(self._mt5, "history_deals_get"):
             deals = self._mt5.history_deals_get(datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0), datetime.now(tz=UTC))
             for item in deals or []:
                 data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-                if self._is_owned_record(data, symbols):
-                    closed_trades.append(data)
+                decision = self._classify_record_ownership(data, symbols)
+                if decision.visible_for_audit:
+                    audit_visible_closed_trades.append(self._with_ownership_metadata(data, decision))
+                if decision.owned_by_bot:
+                    closed_trades.append(self._with_ownership_metadata(data, decision))
                 else:
                     ignored_closed_trades += 1
         return BrokerSnapshot(
@@ -299,12 +339,17 @@ class MT5Client:
             closed_trades,
             {
                 "ownership_filter_active": True,
+                "ownership_mode": self.config.ownership_mode,
+                "ownership_policy_version": 1,
                 "magic_number": self.config.magic_number,
                 "comment_tag": self.config.comment_tag,
                 "reconcile_symbols_only": self.config.reconcile_symbols_only,
                 "ignored_positions": ignored_positions,
                 "ignored_orders": ignored_orders,
                 "ignored_closed_trades": ignored_closed_trades,
+                "audit_visible_positions": audit_visible_positions,
+                "audit_visible_orders": audit_visible_orders,
+                "audit_visible_closed_trades": audit_visible_closed_trades,
             },
         )
 
@@ -315,7 +360,14 @@ class MT5Client:
                 "orders": [],
                 "deals": [],
                 "positions": [],
-                "scope_report": {"ownership_filter_active": False},
+                "scope_report": {
+                    "ownership_filter_active": False,
+                    "ownership_mode": self.config.ownership_mode,
+                    "ownership_policy_version": 1,
+                    "audit_visible_positions": [],
+                    "audit_visible_orders": [],
+                    "audit_visible_deals": [],
+                },
             }
         assert self._mt5 is not None
         start = datetime.now(tz=UTC) - timedelta(days=max(history_days, 1))
@@ -329,22 +381,34 @@ class MT5Client:
         ignored_positions = 0
         ignored_orders = 0
         ignored_deals = 0
+        audit_visible_positions: list[dict[str, Any]] = []
+        audit_visible_orders: list[dict[str, Any]] = []
+        audit_visible_deals: list[dict[str, Any]] = []
         for item in raw_positions or []:
             data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-            if self._is_owned_record(data, symbols):
-                positions.append(data)
+            decision = self._classify_record_ownership(data, symbols)
+            if decision.visible_for_audit:
+                audit_visible_positions.append(self._with_ownership_metadata(data, decision))
+            if decision.owned_by_bot:
+                positions.append(self._with_ownership_metadata(data, decision))
             else:
                 ignored_positions += 1
         for item in raw_orders or []:
             data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-            if self._is_owned_record(data, symbols):
-                orders.append(data)
+            decision = self._classify_record_ownership(data, symbols)
+            if decision.visible_for_audit:
+                audit_visible_orders.append(self._with_ownership_metadata(data, decision))
+            if decision.owned_by_bot:
+                orders.append(self._with_ownership_metadata(data, decision))
             else:
                 ignored_orders += 1
         for item in raw_deals or []:
             data = item._asdict() if hasattr(item, "_asdict") else dict(item)
-            if self._is_owned_record(data, symbols):
-                deals.append(data)
+            decision = self._classify_record_ownership(data, symbols)
+            if decision.visible_for_audit:
+                audit_visible_deals.append(self._with_ownership_metadata(data, decision))
+            if decision.owned_by_bot:
+                deals.append(self._with_ownership_metadata(data, decision))
             else:
                 ignored_deals += 1
         return {
@@ -354,12 +418,17 @@ class MT5Client:
             "positions": positions,
             "scope_report": {
                 "ownership_filter_active": True,
+                "ownership_mode": self.config.ownership_mode,
+                "ownership_policy_version": 1,
                 "magic_number": self.config.magic_number,
                 "comment_tag": self.config.comment_tag,
                 "reconcile_symbols_only": self.config.reconcile_symbols_only,
                 "ignored_positions": ignored_positions,
                 "ignored_orders": ignored_orders,
                 "ignored_deals": ignored_deals,
+                "audit_visible_positions": audit_visible_positions,
+                "audit_visible_orders": audit_visible_orders,
+                "audit_visible_deals": audit_visible_deals,
             },
         }
 
@@ -456,11 +525,12 @@ class MT5Client:
 
     def dry_run_market_order(self, order: OrderRequest) -> DryRunOrderResult:
         if not self.ensure_connection():
+            health = self.session_health()
             issue = MT5ValidationIssue(
                 scope="connection",
                 code="not_connected",
                 message="MT5 is not connected",
-                details={"health": self.session_health().to_dict() if self.session_health() else {}},
+                details={"health": health.to_dict() if health is not None else {}},
             )
             return DryRunOrderResult(False, "not_connected", None, None, [issue])
         assert self._mt5 is not None
@@ -805,22 +875,38 @@ class MT5Client:
             "type_filling": filling_mode,
         }
 
-    def _is_owned_record(self, data: dict[str, Any], symbols: tuple[str, ...]) -> bool:
-        if self.config.reconcile_symbols_only and symbols and data.get("symbol") not in symbols:
-            return False
+    def _classify_record_ownership(self, data: dict[str, Any], symbols: tuple[str, ...]) -> OwnershipDecision:
+        symbol = str(data.get("symbol", ""))
+        in_symbol_scope = not self.config.reconcile_symbols_only or not symbols or symbol in symbols
+        visible_for_audit = in_symbol_scope
         magic = data.get("magic")
+        magic_match = False
         if magic is not None:
             try:
                 if int(magic) == self.config.magic_number:
-                    return True
+                    magic_match = True
             except (TypeError, ValueError):
                 pass
         comment = str(data.get("comment", ""))
-        if self.config.comment_tag and self.config.comment_tag in comment:
-            return True
-        if self.config.reconcile_symbols_only and symbols and data.get("symbol") in symbols:
-            return True
-        return False
+        comment_match = bool(self.config.comment_tag and self.config.comment_tag in comment)
+
+        if magic_match:
+            return OwnershipDecision(True, in_symbol_scope, visible_for_audit, "magic_match")
+        if comment_match:
+            return OwnershipDecision(True, in_symbol_scope, visible_for_audit, "comment_match")
+        if in_symbol_scope:
+            return OwnershipDecision(
+                self.config.ownership_mode == "compatibility",
+                in_symbol_scope,
+                visible_for_audit,
+                "symbol_scope_only",
+            )
+        return OwnershipDecision(False, in_symbol_scope, visible_for_audit, "unowned")
+
+    def _with_ownership_metadata(self, data: dict[str, Any], decision: OwnershipDecision) -> dict[str, Any]:
+        enriched = dict(data)
+        enriched.update(decision.to_dict())
+        return enriched
 
     def _validate_request_payload(self, request: dict[str, Any]) -> list[str]:
         required = [

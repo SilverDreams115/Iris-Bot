@@ -114,6 +114,20 @@ def test_focus_symbol_is_gbpusd() -> None:
     assert SECONDARY_SYMBOL == "EURUSD"
 
 
+def test_runtime_focus_symbol_can_override_to_eurusd(monkeypatch: pytest.MonkeyPatch) -> None:
+    from iris_bot.symbol_focused_rework import _runtime_focus_symbol, _runtime_secondary_symbol, _variant_specs_for_focus_symbol
+
+    monkeypatch.setenv("IRIS_SYMBOL_FOCUS_REWORK_SYMBOL", "EURUSD")
+
+    assert _runtime_focus_symbol() == "EURUSD"
+    assert _runtime_secondary_symbol() == "GBPUSD"
+    assert [item["variant_id"] for item in _variant_specs_for_focus_symbol("EURUSD")] == [
+        "V1_baseline",
+        "V3_horizon_12_only",
+        "V4_exit_risk_only",
+    ]
+
+
 def test_feature_names_pruned_removes_confirmed_duplicates() -> None:
     from iris_bot.symbol_focused_rework import _FEATURES_TO_PRUNE, _feature_names
     from iris_bot.processed_dataset import FEATURE_NAMES_BASE
@@ -133,7 +147,6 @@ def test_feature_names_pruned_removes_confirmed_duplicates() -> None:
 
 def test_label_diagnostic_structure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from iris_bot.symbol_focused_rework import _label_diagnostic, FOCUS_SYMBOL
-    from iris_bot.config import load_settings
     from iris_bot.data import load_bars
     from iris_bot.processed_dataset import build_processed_dataset
 
@@ -164,7 +177,6 @@ def test_label_diagnostic_structure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_label_diagnostic_clean_ratio_components_sum(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from iris_bot.symbol_focused_rework import _label_diagnostic, FOCUS_SYMBOL
-    from iris_bot.config import load_settings
     from iris_bot.data import load_bars
     from iris_bot.processed_dataset import build_processed_dataset
 
@@ -237,6 +249,7 @@ def _wf_result(**overrides: Any) -> dict[str, Any]:
             "total_net_pnl_usd": 20.0,
             "mean_net_pnl_usd": 5.0,
             "mean_profit_factor": 1.15,
+            "trade_weighted_profit_factor": 1.15,  # ADR-003: gate key
             "mean_expectancy_usd": 1.00,
             "worst_fold_drawdown_usd": 40.0,
             "mean_no_trade_ratio": 0.50,
@@ -275,13 +288,14 @@ def test_gate_negative_expectancy_rejects(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_gate_soft_wf_only_gives_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test passes + WF slightly negative → CANDIDATE_FOR_DEMO_EXECUTION."""
-    from iris_bot.symbol_focused_rework import _apply_variant_gates, _DEMO_CANDIDATE_SOFT_WF_FLOOR
+    from iris_bot.symbol_focused_rework import _apply_variant_gates
     settings = _make_settings_for_gates(tmp_path, monkeypatch)
     wf = _wf_result(
         aggregate={
             "total_net_pnl_usd": -10.0,   # slightly negative, above soft floor
             "mean_net_pnl_usd": -2.5,
-            "mean_profit_factor": 0.90,    # below floor
+            "mean_profit_factor": 0.90,              # below floor (audit only)
+            "trade_weighted_profit_factor": 0.90,    # below floor (gate key, ADR-003)
             "mean_expectancy_usd": -0.80,  # below zero
             "worst_fold_drawdown_usd": 30.0,
             "mean_no_trade_ratio": 0.40,
@@ -301,6 +315,7 @@ def test_gate_positive_expectancy_but_wf_too_negative_gives_improved(tmp_path: P
             "total_net_pnl_usd": -200.0,   # way below soft floor
             "mean_net_pnl_usd": -50.0,
             "mean_profit_factor": 0.50,
+            "trade_weighted_profit_factor": 0.50,    # ADR-003 gate key
             "mean_expectancy_usd": -5.0,
             "worst_fold_drawdown_usd": 300.0,
             "mean_no_trade_ratio": 0.40,
@@ -407,7 +422,6 @@ def test_audit_symbol_signal_writes_diagnostic_report(tmp_path: Path, monkeypatc
 
 def test_audit_symbol_signal_returns_one_on_missing_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from iris_bot.symbol_focused_rework import run_audit_symbol_signal
-    from iris_bot.config import load_settings
 
     settings = _scoped_settings(tmp_path, monkeypatch, bars_per_symbol=50)
     # Point to a non-existent file

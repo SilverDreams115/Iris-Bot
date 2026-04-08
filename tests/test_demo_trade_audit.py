@@ -5,17 +5,11 @@ All tests use pure in-memory data — no real MT5 connection required.
 from __future__ import annotations
 
 import csv
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
 
 from iris_bot.demo_trade_audit import (
-    DemoTradeAuditReport,
-    FillQualityStats,
-    PnlDivergenceStats,
-    SlippageStats,
     _compute_fill_quality,
     _compute_pnl_divergence,
     _compute_slippage,
@@ -24,18 +18,9 @@ from iris_bot.demo_trade_audit import (
     run_demo_trade_audit,
 )
 from iris_bot.config_types import (
-    BacktestConfig,
     DataConfig,
     DemoAuditConfig,
-    LoggingConfig,
-    MT5Config,
-    OperationalConfig,
-    ReconciliationConfig,
-    RecoveryConfig,
-    RiskConfig,
-    SessionConfig,
     Settings,
-    TradingConfig,
 )
 
 

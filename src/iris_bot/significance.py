@@ -45,6 +45,17 @@ def _metric_float(payload: dict[str, object], key: str) -> float:
     raise KeyError(f"Metric {key!r} not found or not numeric in aggregate payload")
 
 
+def _metric_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    raise KeyError(f"Metric {key!r} not found or not integral in aggregate payload")
+
+
 def _safe_sqrt(value: float) -> float | None:
     if value < 0.0:
         return None
@@ -375,9 +386,9 @@ def run_walkforward_permutation_significance(
 ) -> dict[str, object]:
     metric_name = settings.significance.metric_name
 
-    def evaluator(candidate_rows: list[ProcessedRow]) -> EvaluationResult:
+    def evaluator(rows: list[ProcessedRow]) -> EvaluationResult:
         walkforward = run_walkforward_economic_backtest(
-            rows=candidate_rows,
+            rows=rows,
             feature_names=feature_names,
             settings=settings,
             run_dir=settings.data.runs_dir,
@@ -391,8 +402,8 @@ def run_walkforward_permutation_significance(
         return EvaluationResult(
             metric_value=_metric_float(aggregate, metric_name),
             aggregate=aggregate,
-            valid_folds=int(walkforward["valid_folds"]),
-            skipped_folds=int(walkforward["skipped_folds"]),
+            valid_folds=_metric_int(walkforward, "valid_folds"),
+            skipped_folds=_metric_int(walkforward, "skipped_folds"),
             returns=returns,
             sharpe_ratio=compute_sharpe_ratio(returns),
         )

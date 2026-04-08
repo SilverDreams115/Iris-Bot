@@ -75,7 +75,7 @@ def _mt5_connectivity_check(settings: Settings, client_factory: Callable[[], MT5
 
 def _demo_readiness_check(settings: Settings) -> ChecklistItem:
     report = generate_demo_execution_readiness_report(settings)
-    ok = report["decision"] in {"ready_for_next_phase", "caution"}
+    ok = report["decision"] in {"ready_for_demo_guarded", "ready_for_demo_with_reservations"}
     return ChecklistItem(
         ok=ok,
         reason="ok" if ok else f"readiness_decision:{report['decision']}",

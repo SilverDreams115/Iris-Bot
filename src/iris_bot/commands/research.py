@@ -9,7 +9,20 @@ from iris_bot.edge_diagnostics import (
     run_audit_label_noise,
     run_audit_regime_value,
 )
+from iris_bot.exit_lifecycle_realignment import (
+    run_audit_exit_lifecycle,
+    run_compare_h12_exit_variants,
+    run_evaluate_gbpusd_demo_candidate,
+    run_h12_exit_realignment,
+)
 from iris_bot.experiments import run_experiment
+from iris_bot.label_horizon_realignment import (
+    run_audit_timeout_impact,
+    run_audit_trade_duration,
+    run_compare_exit_alignment,
+    run_evaluate_label_horizon_candidate,
+    run_label_horizon_realignment,
+)
 from iris_bot.quant_experiments import (
     audit_effective_config_command,
     audit_symbol_context_command,
@@ -151,3 +164,39 @@ def audit_class_separability_command(settings: Settings) -> int:
 
 def audit_edge_hypotheses_command(settings: Settings) -> int:
     return run_audit_edge_hypotheses(settings)
+
+
+def audit_trade_duration_command(settings: Settings) -> int:
+    return run_audit_trade_duration(settings)
+
+
+def audit_timeout_impact_command(settings: Settings) -> int:
+    return run_audit_timeout_impact(settings)
+
+
+def run_label_horizon_realignment_command(settings: Settings) -> int:
+    return run_label_horizon_realignment(settings)
+
+
+def compare_exit_alignment_command(settings: Settings) -> int:
+    return run_compare_exit_alignment(settings)
+
+
+def evaluate_label_horizon_candidate_command(settings: Settings) -> int:
+    return run_evaluate_label_horizon_candidate(settings)
+
+
+def audit_exit_lifecycle_command(settings: Settings) -> int:
+    return run_audit_exit_lifecycle(settings)
+
+
+def run_h12_exit_realignment_command(settings: Settings) -> int:
+    return run_h12_exit_realignment(settings)
+
+
+def compare_h12_exit_variants_command(settings: Settings) -> int:
+    return run_compare_h12_exit_variants(settings)
+
+
+def evaluate_gbpusd_demo_candidate_command(settings: Settings) -> int:
+    return run_evaluate_gbpusd_demo_candidate(settings)

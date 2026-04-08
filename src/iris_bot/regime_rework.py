@@ -12,6 +12,7 @@ from iris_bot.artifacts import wrap_artifact
 from iris_bot.backtest import TradeRecord, run_backtest_engine
 from iris_bot.config import LabelingConfig, Settings
 from iris_bot.data import Bar, load_bars, write_bars
+from iris_bot.durable_io import durable_write_json
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
 from iris_bot.mt5 import MT5Client
 from iris_bot.processed_dataset import FEATURE_NAMES_BASE, ProcessedRow, build_processed_dataset
@@ -48,6 +49,24 @@ MIN_TEST_ROWS = 5
 MIN_TRADES_FOR_THRESHOLD = 3
 SOFT_WF_PNL_FLOOR = -5.0
 MAX_WF_PNL_STDDEV_FOR_CANDIDATE = 35.0
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
 
 
 @dataclass(frozen=True)
@@ -247,7 +266,7 @@ def run_fetch_extended_history(settings: Settings) -> int:
         "timeframes": list(settings.trading.timeframes),
         "run_dir": str(run_dir),
     }
-    _extended_metadata_path(settings).write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    durable_write_json(_extended_metadata_path(settings), metadata)
     report = {
         "focus_symbol": FOCUS_SYMBOL,
         "secondary_symbol": SECONDARY_SYMBOL,
@@ -321,14 +340,14 @@ def _select_threshold_economic(
             exit_policy_config=settings.exit_policy,
             dynamic_exit_config=settings.dynamic_exits,
         )
-        trades = int(metrics.get("total_trades", 0) or 0)
-        expectancy = float(metrics.get("expectancy_usd", 0.0) or 0.0)
+        trades = _safe_int(metrics.get("total_trades"))
+        expectancy = _safe_float(metrics.get("expectancy_usd"))
         candidates.append(
             {
                 "threshold": threshold,
                 "trade_count": trades,
                 "expectancy_usd": expectancy,
-                "profit_factor": float(metrics.get("profit_factor", 0.0) or 0.0),
+                "profit_factor": _safe_float(metrics.get("profit_factor")),
             }
         )
         if trades < MIN_TRADES_FOR_THRESHOLD:
@@ -415,11 +434,11 @@ def _evaluate_predictions(
     no_trade_ratio = Counter(predictions).get(0, 0) / len(predictions) if predictions else 0.0
     return {
         "row_count": len(rows),
-        "trade_count": int(metrics["total_trades"]),
-        "net_pnl_usd": float(metrics["net_pnl_usd"]),
-        "expectancy_usd": float(metrics["expectancy_usd"]),
-        "profit_factor": float(metrics["profit_factor"]),
-        "max_drawdown_usd": float(metrics["max_drawdown_usd"]),
+        "trade_count": _safe_int(metrics.get("total_trades")),
+        "net_pnl_usd": _safe_float(metrics.get("net_pnl_usd")),
+        "expectancy_usd": _safe_float(metrics.get("expectancy_usd")),
+        "profit_factor": _safe_float(metrics.get("profit_factor")),
+        "max_drawdown_usd": _safe_float(metrics.get("max_drawdown_usd")),
         "no_trade_ratio": no_trade_ratio,
         "threshold": threshold,
     }, trades
@@ -538,7 +557,7 @@ def _walk_forward_report(
     valid = [fold for fold in fold_summaries if not fold.get("skipped")]
     net_pnls = [float(fold["net_pnl_usd"]) for fold in valid]
     profits = [float(fold["profit_factor"]) for fold in valid]
-    trades = [int(fold["trade_count"]) for fold in valid]
+    trade_counts = [_safe_int(fold["trade_count"]) for fold in valid]
     no_trade_ratios = [float(fold["no_trade_ratio"]) for fold in valid]
     drawdowns = [float(fold["max_drawdown_usd"]) for fold in valid]
     positive_folds = sum(1 for fold in valid if float(fold["net_pnl_usd"]) > 0.0)
@@ -554,38 +573,38 @@ def _walk_forward_report(
             "mean_no_trade_ratio": mean(no_trade_ratios) if no_trade_ratios else 0.0,
             "worst_fold_drawdown_usd": max(drawdowns) if drawdowns else 0.0,
             "net_pnl_stddev": pstdev(net_pnls) if len(net_pnls) > 1 else 0.0,
-            "total_trades": sum(trades),
+            "total_trades": sum(trade_counts),
         },
     }
 
 
 def _decision(settings: Settings, test_metrics: dict[str, Any], walk_forward: dict[str, Any], regime_delta: float) -> tuple[str, list[str]]:
     reasons: list[str] = []
-    if int(test_metrics["trade_count"]) < settings.strategy.min_validation_trades:
+    if _safe_int(test_metrics["trade_count"]) < settings.strategy.min_validation_trades:
         reasons.append("test_trade_count_below_floor")
-    if float(test_metrics["expectancy_usd"]) <= 0.0:
+    if _safe_float(test_metrics["expectancy_usd"]) <= 0.0:
         reasons.append("test_expectancy_non_positive")
-    if float(test_metrics["profit_factor"]) < settings.strategy.min_profit_factor:
+    if _safe_float(test_metrics["profit_factor"]) < settings.strategy.min_profit_factor:
         reasons.append("test_profit_factor_below_floor")
-    if float(test_metrics["max_drawdown_usd"]) > settings.strategy.max_drawdown_usd:
+    if _safe_float(test_metrics["max_drawdown_usd"]) > settings.strategy.max_drawdown_usd:
         reasons.append("test_drawdown_above_floor")
-    if float(test_metrics["no_trade_ratio"]) > settings.approved_demo_gate.max_no_trade_ratio:
+    if _safe_float(test_metrics["no_trade_ratio"]) > settings.approved_demo_gate.max_no_trade_ratio:
         reasons.append("test_no_trade_ratio_above_floor")
 
     aggregate = walk_forward["aggregate"]
-    if int(walk_forward["valid_folds"]) == 0:
+    if _safe_int(walk_forward["valid_folds"]) == 0:
         reasons.append("walk_forward_missing")
-    if float(aggregate["total_net_pnl_usd"]) <= 0.0:
+    if _safe_float(aggregate["total_net_pnl_usd"]) <= 0.0:
         reasons.append("walk_forward_non_positive")
-    if float(aggregate["mean_profit_factor"]) < settings.strategy.min_profit_factor:
+    if _safe_float(aggregate["mean_profit_factor"]) < settings.strategy.min_profit_factor:
         reasons.append("walk_forward_profit_factor_below_floor")
-    if float(aggregate["worst_fold_drawdown_usd"]) > settings.strategy.max_drawdown_usd:
+    if _safe_float(aggregate["worst_fold_drawdown_usd"]) > settings.strategy.max_drawdown_usd:
         reasons.append("walk_forward_drawdown_above_floor")
-    if float(aggregate["mean_no_trade_ratio"]) > settings.approved_demo_gate.max_no_trade_ratio:
+    if _safe_float(aggregate["mean_no_trade_ratio"]) > settings.approved_demo_gate.max_no_trade_ratio:
         reasons.append("walk_forward_no_trade_ratio_above_floor")
-    if float(walk_forward["positive_fold_ratio"]) < settings.strategy.min_positive_walkforward_ratio:
+    if _safe_float(walk_forward["positive_fold_ratio"]) < settings.strategy.min_positive_walkforward_ratio:
         reasons.append("walk_forward_positive_fold_ratio_below_floor")
-    if float(aggregate["net_pnl_stddev"]) > MAX_WF_PNL_STDDEV_FOR_CANDIDATE:
+    if _safe_float(aggregate["net_pnl_stddev"]) > MAX_WF_PNL_STDDEV_FOR_CANDIDATE:
         reasons.append("walk_forward_instability_above_floor")
     if regime_delta <= 0.0:
         reasons.append("regime_context_not_helpful")

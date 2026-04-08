@@ -141,6 +141,7 @@ def _load_mt5_config() -> MT5Config:
         history_bars=_env_int("IRIS_MT5_HISTORY_BARS", 1500) or 1500,
         magic_number=_env_int("IRIS_MT5_MAGIC_NUMBER", 20260401) or 20260401,
         comment_tag=_env_str("IRIS_MT5_COMMENT_TAG", "IRIS-Bot"),
+        ownership_mode=_env_str("IRIS_MT5_OWNERSHIP_MODE", "strict"),
         reconcile_symbols_only=_env_bool("IRIS_MT5_RECONCILE_SYMBOLS_ONLY", True),
     )
 
@@ -251,6 +252,7 @@ def _load_endurance_config() -> EnduranceConfig:
 def _load_governance_config() -> GovernanceConfig:
     return GovernanceConfig(
         registry_filename=_env_str("IRIS_GOVERNANCE_REGISTRY_FILENAME", "strategy_profile_registry.json"),
+        policy_filename=_env_str("IRIS_GOVERNANCE_POLICY_FILENAME", "governance_policy.json"),
         target_symbol=_env_str("IRIS_GOVERNANCE_TARGET_SYMBOL", ""),
         target_profile_id=_env_str("IRIS_GOVERNANCE_TARGET_PROFILE_ID", ""),
         promotion_target_state=_env_str("IRIS_GOVERNANCE_PROMOTION_TARGET_STATE", "approved_demo"),
@@ -391,7 +393,7 @@ def _load_demo_execution_config() -> DemoExecutionConfig:
         enabled=_env_bool("IRIS_DEMO_EXECUTION_ENABLED", False),
         target_symbol=_env_str("IRIS_DEMO_EXECUTION_TARGET_SYMBOL", ""),
         max_orders_per_run=_env_int("IRIS_DEMO_EXECUTION_MAX_ORDERS_PER_RUN", 1) or 1,
-        auto_close_after_entry=_env_bool("IRIS_DEMO_EXECUTION_AUTO_CLOSE_AFTER_ENTRY", True),
+        auto_close_after_entry=_env_bool("IRIS_DEMO_EXECUTION_AUTO_CLOSE_AFTER_ENTRY", False),
         require_explicit_activation=_env_bool("IRIS_DEMO_EXECUTION_REQUIRE_EXPLICIT_ACTIVATION", True),
         deviation_points=_env_int("IRIS_DEMO_EXECUTION_DEVIATION_POINTS", 20) or 20,
         registry_filename=_env_str("IRIS_DEMO_EXECUTION_REGISTRY_FILENAME", "demo_execution_registry.json"),
@@ -445,6 +447,12 @@ def validate_config(s: Settings) -> list[str]:
             errors.append("mt5.enabled=True but IRIS_MT5_PASSWORD is not set")
         if not s.mt5.server:
             errors.append("mt5.enabled=True but IRIS_MT5_SERVER is not set")
+    if s.mt5.ownership_mode not in {"strict", "compatibility", "audit_only"}:
+        errors.append(
+            "mt5.ownership_mode="
+            f"{s.mt5.ownership_mode!r} must be one of "
+            "{'strict', 'compatibility', 'audit_only'}"
+        )
 
     if not (0 < s.risk.risk_per_trade <= 0.5):
         errors.append(f"risk_per_trade={s.risk.risk_per_trade} is outside (0, 0.5]")

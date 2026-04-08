@@ -13,7 +13,10 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,6 +25,7 @@ from iris_bot.config import load_settings
 from datetime import UTC, datetime, timedelta
 
 from iris_bot.evidence_store import (
+    EvidenceConflictError,
     ExternalPathError,
     UnknownArtifactTypeError,
     detect_contradictions,
@@ -39,20 +43,24 @@ from iris_bot.run_index import (
 )
 
 
-def _settings(tmp_path: Path, monkeypatch):
+def _settings_for_root(root: Path):
     settings = load_settings()
-    raw_dir = tmp_path / "data" / "raw"
-    processed_dir = tmp_path / "data" / "processed"
-    runs_dir = tmp_path / "runs"
-    runtime_dir = tmp_path / "data" / "runtime"
+    raw_dir = root / "data" / "raw"
+    processed_dir = root / "data" / "processed"
+    runs_dir = root / "runs"
+    runtime_dir = root / "data" / "runtime"
     for p in (raw_dir, processed_dir, runs_dir, runtime_dir):
         p.mkdir(parents=True, exist_ok=True)
-    object.__setattr__(settings, "project_root", tmp_path)
+    object.__setattr__(settings, "project_root", root)
     object.__setattr__(settings.data, "raw_dir", raw_dir)
     object.__setattr__(settings.data, "processed_dir", processed_dir)
     object.__setattr__(settings.data, "runs_dir", runs_dir)
     object.__setattr__(settings.data, "runtime_dir", runtime_dir)
     return settings
+
+
+def _settings(tmp_path: Path, monkeypatch):
+    return _settings_for_root(tmp_path)
 
 
 def _write_lifecycle_artifact(tmp_path: Path, symbol: str, run_id: str, critical: int = 0) -> Path:
@@ -92,6 +100,43 @@ def _write_stability_artifact(tmp_path: Path, symbol: str, run_id: str) -> Path:
     path = run_dir / "symbol_stability_report.json"
     path.write_text(json.dumps(artifact), encoding="utf-8")
     return path
+
+
+def _build_ingest_command(
+    root: Path,
+    source_path: Path,
+    artifact_type: str,
+    source_run_id: str,
+    symbol: str | None,
+) -> list[str]:
+    symbol_literal = "None" if symbol is None else repr(symbol)
+    code = f"""
+from pathlib import Path
+from iris_bot.config import load_settings
+from iris_bot.evidence_store import ingest_evidence
+settings = load_settings()
+root = Path({str(root)!r})
+raw_dir = root / "data" / "raw"
+processed_dir = root / "data" / "processed"
+runs_dir = root / "runs"
+runtime_dir = root / "data" / "runtime"
+for path in (raw_dir, processed_dir, runs_dir, runtime_dir):
+    path.mkdir(parents=True, exist_ok=True)
+object.__setattr__(settings, "project_root", root)
+object.__setattr__(settings.data, "raw_dir", raw_dir)
+object.__setattr__(settings.data, "processed_dir", processed_dir)
+object.__setattr__(settings.data, "runs_dir", runs_dir)
+object.__setattr__(settings.data, "runtime_dir", runtime_dir)
+ingest_evidence(
+    settings,
+    Path({str(source_path)!r}),
+    artifact_type={artifact_type!r},
+    source_run_id={source_run_id!r},
+    symbol={symbol_literal},
+    provenance="concurrent_test",
+)
+"""
+    return [sys.executable, "-c", code]
 
 
 # --- Ingest: basic ---
@@ -148,6 +193,27 @@ def test_ingest_idempotent_same_run(tmp_path, monkeypatch):
     ingest_evidence(settings, source, "lifecycle_reconciliation", "run_1", "EURUSD")
     status = evidence_store_status(settings)
     assert status["total_entries"] == 1  # No duplicate
+
+
+def test_ingest_same_entry_id_different_checksum_raises_conflict(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    first = _write_lifecycle_artifact(tmp_path, "EURUSD", "20260401T100000Z", critical=0)
+    ingest_evidence(settings, first, "lifecycle_reconciliation", "run_1", "EURUSD")
+    second = _write_lifecycle_artifact(tmp_path, "EURUSD", "20260401T100000Z", critical=1)
+    with pytest.raises(EvidenceConflictError, match="Conflicting evidence"):
+        ingest_evidence(settings, second, "lifecycle_reconciliation", "run_1", "EURUSD")
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 1
+
+
+def test_ingest_same_logical_key_same_checksum_keeps_distinct_provenance(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "20260401T100000Z", critical=0)
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "run_1", "EURUSD", provenance="first")
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "run_2", "EURUSD", provenance="second")
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 2
+    assert detect_contradictions(settings) == []
 
 
 # --- External path rejection ---
@@ -239,6 +305,61 @@ def test_get_latest_evidence_payload_fails_on_tampered_file(tmp_path, monkeypatc
     assert result is None
 
 
+def test_ingest_evidence_uses_durable_paths(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "20260401T100000Z")
+    calls: list[tuple[str, Path, Path | dict[str, Any]]] = []
+
+    def fake_copy(source_path: Path, dest_path: Path) -> None:
+        calls.append(("copy", source_path, dest_path))
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(source_path.read_bytes())
+
+    def fake_write_json(path: Path, payload: dict[str, Any]) -> None:
+        calls.append(("json", path, payload))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    monkeypatch.setattr("iris_bot.evidence_store.durable_copy_file", fake_copy)
+    monkeypatch.setattr("iris_bot.evidence_store.durable_write_json", fake_write_json)
+
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "run_1", "EURUSD")
+
+    assert any(call[0] == "copy" for call in calls)
+    assert any(call[0] == "json" and Path(call[1]).name == "evidence_store_manifest.json" for call in calls)
+
+
+def test_evidence_store_concurrent_writers_do_not_lose_updates(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    src1 = _write_lifecycle_artifact(tmp_path, "EURUSD", "run1", critical=0)
+    src2 = _write_lifecycle_artifact(tmp_path, "GBPUSD", "run2", critical=1)
+    p1 = subprocess.Popen(
+        _build_ingest_command(tmp_path, src1, "lifecycle_reconciliation", "run_1", "EURUSD"),
+        cwd=str(Path.cwd()),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    p2 = subprocess.Popen(
+        _build_ingest_command(tmp_path, src2, "lifecycle_reconciliation", "run_2", "GBPUSD"),
+        cwd=str(Path.cwd()),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    try:
+        assert p1.wait(timeout=10) == 0
+        assert p2.wait(timeout=10) == 0
+    finally:
+        for process in (p1, p2):
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+    status = evidence_store_status(settings)
+    assert status["total_entries"] == 2
+    assert status["integrity_ok"] is True
+
+
 # --- Evidence store integrity ---
 
 def test_evidence_store_status_integrity_ok(tmp_path, monkeypatch):
@@ -248,6 +369,9 @@ def test_evidence_store_status_integrity_ok(tmp_path, monkeypatch):
     status = evidence_store_status(settings)
     assert status["integrity_ok"] is True
     assert len(status["integrity_failures"]) == 0
+    assert status["manifest_valid"] is True
+    assert status["schema_version"] == 2
+    assert status["evidence_store_policy_version"] == 1
 
 
 def test_evidence_store_detects_missing_file(tmp_path, monkeypatch):
@@ -259,6 +383,17 @@ def test_evidence_store_detects_missing_file(tmp_path, monkeypatch):
     status = evidence_store_status(settings)
     assert status["integrity_ok"] is False
     assert len(status["integrity_failures"]) > 0
+
+
+def test_evidence_store_status_reports_manifest_corruption(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    manifest_path = settings.data.runtime_dir / "evidence_store" / "evidence_store_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("{not-json", encoding="utf-8")
+    status = evidence_store_status(settings)
+    assert status["manifest_valid"] is False
+    assert status["manifest_error"] is not None
+    assert status["total_entries"] == 0
 
 
 # --- Run index ---
@@ -331,6 +466,17 @@ def test_expire_evidence_removes_old_entries(tmp_path, monkeypatch):
     assert len(expired) == 1
     status = evidence_store_status(settings)
     assert status["total_entries"] == 0
+    assert status["tombstone_count"] == 1
+
+
+def test_expire_evidence_leaves_no_tmp_leftovers(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "old_run")
+    ingest_evidence(settings, source, "lifecycle_reconciliation", "old_run", "EURUSD")
+    future = datetime.now(tz=UTC) + timedelta(days=100)
+    expire_evidence(settings, max_age_days=1, reference_time=future)
+    evidence_files = list((settings.data.runtime_dir / "evidence_store").glob("*.tmp"))
+    assert evidence_files == []
 
 
 def test_expire_evidence_keeps_recent_entries(tmp_path, monkeypatch):
@@ -353,6 +499,23 @@ def test_expire_evidence_deletes_physical_file(tmp_path, monkeypatch):
     future = datetime.now(tz=UTC) + timedelta(days=400)
     expire_evidence(settings, max_age_days=1, reference_time=future)
     assert not canonical.exists()
+
+
+def test_expire_evidence_persists_tombstone_history(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    source = _write_lifecycle_artifact(tmp_path, "EURUSD", "run_tombstone")
+    entry = ingest_evidence(settings, source, "lifecycle_reconciliation", "run_tombstone", "EURUSD")
+    future = datetime.now(tz=UTC) + timedelta(days=400)
+    expire_evidence(settings, max_age_days=1, reference_time=future)
+    manifest_path = settings.data.runtime_dir / "evidence_store" / "evidence_store_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tombstones = manifest["tombstones"]
+    assert len(tombstones) == 1
+    tombstone = tombstones[0]
+    assert tombstone["entry_id"] == entry["entry_id"]
+    assert tombstone["checksum"] == entry["checksum"]
+    assert tombstone["tombstone_policy"] == "tombstone_expiry_v1"
+    assert tombstone["expiration_reason"] == "created_at_older_than_1_days"
 
 
 def test_expire_evidence_zero_max_age_raises(tmp_path, monkeypatch):

@@ -23,16 +23,30 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
+from iris_bot.artifacts import attach_artifact_provenance, build_artifact_provenance
 from iris_bot.backtest import run_backtest_engine, write_equity_curve, write_trade_log
 from iris_bot.config import Settings
 from iris_bot.consistency import verify_engine_consistency
+from iris_bot.contract_versions import (
+    EVALUATION_CONTRACT_VERSION,
+    TRAINING_CONTRACT_VERSION,
+    contract_bundle_fingerprint,
+    contract_fingerprint,
+)
+from iris_bot.evaluation_contract import build_evaluation_contract, filter_rows_by_symbol_profiles, resolve_threshold_by_symbol
 from iris_bot.logging_utils import write_json_report
 from iris_bot.preprocessing import validate_feature_rows
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.symbols import load_symbol_strategy_profiles
 from iris_bot.thresholds import select_threshold_from_probabilities
-from iris_bot.walk_forward import generate_walk_forward_windows
+from iris_bot.training_contract import (
+    build_training_contract,
+    compute_economic_sample_weights,
+    summarize_economic_sample_weights,
+)
+from iris_bot.walk_forward import WalkForwardWindow, generate_walk_forward_windows
 from iris_bot.xgb_model import XGBoostMultiClassModel
 
 
@@ -159,7 +173,7 @@ _MIN_TEST = 5
 
 
 def _run_fold(
-    window: object,
+    window: WalkForwardWindow,
     rows: list[ProcessedRow],
     feature_names: list[str],
     settings: Settings,
@@ -171,16 +185,18 @@ def _run_fold(
     policy: str,
 ) -> tuple[WalkForwardFoldSummary, dict[str, object]]:
     """Execute a single walk-forward fold. Returns (summary, report_dict)."""
-    fold_index = window.fold_index  # type: ignore[union-attr]
-    train_rows = rows[window.train_start : window.train_end]  # type: ignore[union-attr]
-    val_rows = rows[window.validation_start : window.validation_end]  # type: ignore[union-attr]
-    test_rows = rows[window.test_start : window.test_end]  # type: ignore[union-attr]
+    fold_index = window.fold_index
+    train_rows = rows[window.train_start : window.train_end]
+    raw_val_rows = rows[window.validation_start : window.validation_end]
+    raw_test_rows = rows[window.test_start : window.test_end]
+    val_rows = filter_rows_by_symbol_profiles(raw_val_rows, symbol_profiles, allowed_states={"enabled", "caution"})
+    test_rows = filter_rows_by_symbol_profiles(raw_test_rows, symbol_profiles, allowed_states={"enabled", "caution"})
 
     def _skip(reason: str) -> tuple[WalkForwardFoldSummary, dict[str, object]]:
         logger.warning("fold=%02d skipped: %s", fold_index, reason)
         return (
             _skipped_summary(fold_index, reason),
-            {"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()},  # type: ignore[union-attr]
+            {"fold": fold_index, "skipped": True, "reason": reason, "window": window.to_dict()},
         )
 
     if len(train_rows) < _MIN_TRAIN:
@@ -198,8 +214,16 @@ def _run_fold(
         return _skip(f"feature extraction failed: {exc}")
 
     fold_model = XGBoostMultiClassModel(settings.xgboost)
+    economic_weights = compute_economic_sample_weights(train_rows)
     try:
-        fold_model.fit(train_matrix, train_labels, val_matrix, val_labels)
+        fold_model.fit(
+            train_matrix,
+            train_labels,
+            val_matrix,
+            val_labels,
+            feature_names=feature_names,
+            sample_weights=economic_weights,
+        )
     except RuntimeError as exc:
         return _skip(f"model training failed: {exc}")
 
@@ -213,6 +237,7 @@ def _run_fold(
     )
 
     test_probs = fold_model.predict_probabilities(test_matrix)
+    threshold_by_symbol = resolve_threshold_by_symbol(threshold_result.threshold, symbol_profiles)
     metrics, trades, equity_curve = run_backtest_engine(
         rows=test_rows,
         probabilities=test_probs,
@@ -224,6 +249,7 @@ def _run_fold(
         exit_policy_config=settings.exit_policy,
         dynamic_exit_config=settings.dynamic_exits,
         symbol_exit_profiles={sym: prof.exit_profile for sym, prof in symbol_profiles.items()},
+        threshold_by_symbol=threshold_by_symbol,
     )
 
     consistency = verify_engine_consistency(
@@ -234,21 +260,70 @@ def _run_fold(
     if not consistency.is_clean:
         logger.warning("fold=%02d consistency FAILED errors=%s", fold_index, consistency.error_count)
 
+    training_contract = build_training_contract(
+        settings,
+        feature_names,
+        use_primary_timeframe_only=True,
+        feature_source="walk_forward.feature_names_argument",
+    )
+    evaluation_contract = build_evaluation_contract(
+        settings,
+        evaluation_mode="walk_forward_economic_fold",
+        threshold_source="validation_probabilities",
+        threshold=threshold_result.threshold,
+        threshold_metric=threshold_result.metric_name,
+        threshold_value=threshold_result.metric_value,
+        threshold_by_symbol=threshold_by_symbol,
+        profile_gating_mode="symbol_profile_enabled_states_and_sessions",
+        allowed_profile_states={"enabled", "caution"},
+        consistency_requires_equity_curve=True,
+    )
     fold_report: dict[str, object] = {
         "fold": fold_index,
         "skipped": False,
-        "window": window.to_dict(),  # type: ignore[union-attr]
+        "window": window.to_dict(),
         "intrabar_policy": policy,
+        "training_contract_version": TRAINING_CONTRACT_VERSION,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+        "training_contract": training_contract,
+        "evaluation_contract": evaluation_contract,
+        "contract_hashes": {
+            "training_contract": contract_fingerprint(training_contract),
+            "evaluation_contract": contract_fingerprint(evaluation_contract),
+            "bundle": contract_bundle_fingerprint(training_contract, evaluation_contract),
+        },
         "threshold": threshold_result.threshold,
         "threshold_metric": threshold_result.metric_name,
         "threshold_value": threshold_result.metric_value,
+        "effective_threshold_by_symbol": threshold_by_symbol,
         "train_rows": len(train_rows),
         "val_rows": len(val_rows),
         "test_rows": len(test_rows),
+        "raw_val_rows": len(raw_val_rows),
+        "raw_test_rows": len(raw_test_rows),
+        "profile_filtered_val_rows": len(raw_val_rows) - len(val_rows),
+        "profile_filtered_test_rows": len(raw_test_rows) - len(test_rows),
+        "economic_sample_weights": summarize_economic_sample_weights(economic_weights),
         "metrics": metrics,
         "trade_count": len(trades),
         "consistency": consistency.to_dict(),
     }
+    contract_hashes = cast(dict[str, str], fold_report["contract_hashes"])
+    fold_report = attach_artifact_provenance(
+        fold_report,
+        build_artifact_provenance(
+            run_dir=(run_dir / f"fold_{fold_index:02d}") if persist_artifacts else run_dir,
+            parent_run_id=run_dir.name,
+            training_contract_version=TRAINING_CONTRACT_VERSION,
+            evaluation_contract_version=EVALUATION_CONTRACT_VERSION,
+            contract_hashes=contract_hashes,
+            correlation_keys={
+                "command": "walk_forward_fold",
+                "fold_index": str(fold_index),
+            },
+            references={"parent_run_dir": str(run_dir)},
+        ),
+    )
     if persist_artifacts:
         fold_dir = run_dir / f"fold_{fold_index:02d}"
         fold_dir.mkdir(parents=True, exist_ok=True)

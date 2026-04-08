@@ -5,19 +5,31 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from iris_bot.backtest import (
-    _commission_usd,
-    _estimate_cost_breakdown,
-    _exit_execution_price,
-    _filter_backtest_rows,
-    _locate_experiment_reference,
-    _mark_to_market,
-    _resolve_intrabar_exit,
+from iris_bot.artifacts import attach_artifact_provenance, build_artifact_provenance
+from iris_bot.backtest import EquityPoint
+from iris_bot.backtest_analysis import compute_signal_probabilities, mark_to_market
+from iris_bot.backtest_pricing import (
     build_instrument,
-    compute_signal_probabilities,
+    commission_usd,
+    estimate_cost_breakdown,
+    exit_execution_price,
+    resolve_intrabar_exit,
 )
 from iris_bot.config import BacktestConfig, RiskConfig, Settings
 from iris_bot.consistency import verify_engine_consistency
+from iris_bot.contract_versions import (
+    EVALUATION_CONTRACT_VERSION,
+    TRAINING_CONTRACT_VERSION,
+    contract_bundle_fingerprint,
+    contract_fingerprint,
+)
+from iris_bot.evaluation_contract import (
+    build_evaluation_contract,
+    filter_reference_rows,
+    filter_rows_by_symbol_profiles,
+    locate_experiment_reference,
+    resolve_threshold_by_symbol,
+)
 from iris_bot.exits import build_exit_policies
 from iris_bot.governance import resolve_active_profiles
 from iris_bot.logging_utils import build_run_directory, configure_logging
@@ -31,8 +43,10 @@ from iris_bot.operational import (
     write_operational_artifacts,
 )
 from iris_bot.processed_dataset import ProcessedRow, load_processed_dataset
+from iris_bot.profile_registry import load_strategy_profile_registry
+from iris_bot.portfolio import build_portfolio_separation
 from iris_bot.risk import realized_pnl_usd
-from iris_bot.symbols import load_symbol_strategy_profiles, row_allowed_by_profile
+from iris_bot.symbols import load_symbol_strategy_profiles
 from iris_bot.symbols import profile_trace as symbol_profile_trace
 from iris_bot.thresholds import apply_probability_threshold
 from iris_bot.xgb_model import XGBoostMultiClassModel
@@ -57,6 +71,18 @@ __all__ = [
     "PaperSessionConfig",
 ]
 
+# Backward-compatible aliases for callers/tests that still monkeypatch the
+# historical paper-local helpers while the source of truth now lives in
+# evaluation_contract.
+_locate_experiment_reference = locate_experiment_reference
+_filter_backtest_rows = filter_reference_rows
+
+
+def _governed_operation_symbols(settings: Settings) -> set[str]:
+    if not settings.governance.require_active_profile:
+        return set(settings.trading.symbols)
+    separation = build_portfolio_separation(settings, load_strategy_profile_registry(settings))
+    return set(separation.eligible_universe)
 
 def _process_bar_exit(
     state: PaperEngineState,
@@ -75,7 +101,7 @@ def _process_bar_exit(
     if active is None:
         return
     instrument = build_instrument(row.symbol, backtest)
-    raw_exit_price, exit_reason, is_ambiguous = _resolve_intrabar_exit(
+    raw_exit_price, exit_reason, is_ambiguous = resolve_intrabar_exit(
         direction=active.direction,
         bar_low=row.low,
         bar_high=row.high,
@@ -93,11 +119,11 @@ def _process_bar_exit(
     if raw_exit_price is None or exit_reason is None:
         return
 
-    exit_price = _exit_execution_price(raw_exit_price, active.direction, instrument, backtest)
+    exit_price = exit_execution_price(raw_exit_price, active.direction, instrument, backtest)
     gross_pnl = realized_pnl_usd(instrument, active.entry_price, exit_price, active.direction, active.volume_lots, aux_rates)
-    commission_exit = _commission_usd(active.volume_lots, backtest)
+    commission_exit = commission_usd(active.volume_lots, backtest)
     entry_raw_price = series[active.entry_index].open
-    spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
+    spread_cost_usd, slippage_cost_usd = estimate_cost_breakdown(
         instrument, entry_raw_price, raw_exit_price, active.direction, active.volume_lots, backtest, aux_rates,
     )
     net_pnl = gross_pnl - active.commission_entry_usd - commission_exit
@@ -168,11 +194,11 @@ def _close_remaining_positions(
         series = rows_by_symbol[symbol]
         last_row = series[-1]
         instrument = build_instrument(symbol, backtest)
-        exit_price = _exit_execution_price(last_row.close, position.direction, instrument, backtest)
+        exit_price = exit_execution_price(last_row.close, position.direction, instrument, backtest)
         gross_pnl = realized_pnl_usd(instrument, position.entry_price, exit_price, position.direction, position.volume_lots, aux_rates)
-        commission_exit = _commission_usd(position.volume_lots, backtest)
+        commission_exit = commission_usd(position.volume_lots, backtest)
         entry_raw_price = series[position.entry_index].open
-        spread_cost_usd, slippage_cost_usd = _estimate_cost_breakdown(
+        spread_cost_usd, slippage_cost_usd = estimate_cost_breakdown(
             instrument, entry_raw_price, last_row.close, position.direction, position.volume_lots, backtest, aux_rates,
         )
         net_pnl = gross_pnl - position.commission_entry_usd - commission_exit
@@ -258,6 +284,7 @@ def run_paper_engine(
     events: list[OperationalEvent] = []
     signal_rows: list[dict[str, Any]] = []
     execution_rows: list[dict[str, Any]] = []
+    equity_curve_points: list[EquityPoint] = []
 
     row_key_to_probability = {
         (row.timestamp.isoformat(), row.symbol, row.timeframe): prob
@@ -395,8 +422,16 @@ def run_paper_engine(
             instrument = build_instrument(sym, config.backtest)
             pos_series = rows_by_symbol[sym]
             pos_index = min(position.entry_index + position.bars_held, len(pos_series) - 1)
-            equity += _mark_to_market(position, pos_series[pos_index], instrument, config.backtest, config.aux_rates)
+            equity += mark_to_market(position, pos_series[pos_index], instrument, config.backtest, config.aux_rates)
         state.account_state.equity_usd = equity
+        equity_curve_points.append(
+            EquityPoint(
+                timestamp=timestamp_text,
+                balance=state.account_state.balance_usd,
+                equity=state.account_state.equity_usd,
+                open_positions=len(state.open_positions),
+            )
+        )
 
     _close_remaining_positions(state, rows_by_symbol, config.backtest, config.aux_rates, events)
     state.account_state.equity_usd = state.account_state.balance_usd
@@ -427,7 +462,7 @@ def run_paper_engine(
     state.current_session_status.status = "completed"
     consistency = verify_engine_consistency(
         trades=state.closed_positions,
-        equity_curve=[],
+        equity_curve=equity_curve_points,
         starting_balance=config.backtest.starting_balance_usd,
     )
     daily_summary = {
@@ -458,12 +493,14 @@ def run_paper_engine(
         "blocked_trades_summary": dict(state.blocked_trades_summary),
         "closed_trade_count": len(state.closed_positions),
         "event_count": len(events),
+        "equity_point_count": len(equity_curve_points),
         "future_exit_policy_extension": asdict(exit_policy_config),
     }
     return PaperRunArtifacts(
         state=state,
         events=events,
         closed_trades=state.closed_positions,
+        equity_curve_rows=[asdict(item) for item in equity_curve_points],
         daily_summary=daily_summary,
         run_report=run_report,
         validation_report=validation_report,
@@ -487,25 +524,18 @@ def load_paper_context(
     rows = [row for row in rows if row.symbol in tradable_symbols]
     if allowed_profile_states is None and settings.governance.require_active_profile:
         symbol_profiles, active_report = resolve_active_profiles(settings)
+        governed_symbols = _governed_operation_symbols(settings)
         invalid = {
             symbol: payload["reasons"]
             for symbol, payload in active_report["symbols"].items()
-            if not payload["ok"] and symbol in set(settings.trading.symbols)
+            if not payload["ok"] and symbol in governed_symbols
         }
         if invalid:
             raise RuntimeError(f"Invalid active profiles for operation: {invalid}")
     else:
         symbol_profiles = load_symbol_strategy_profiles(settings)
     allowed_states = allowed_profile_states or {"enabled", "caution"}
-    rows = [
-        row
-        for row in rows
-        if symbol_profiles.get(row.symbol) is None
-        or (
-            symbol_profiles[row.symbol].enabled_state in allowed_states
-            and row_allowed_by_profile(symbol_profiles[row.symbol], row.timestamp, row.timeframe)
-        )
-    ]
+    rows = filter_rows_by_symbol_profiles(rows, symbol_profiles, allowed_states=allowed_states)
     if not rows:
         raise FileNotFoundError("No processed rows available for paper trading window")
     model = XGBoostMultiClassModel(settings.xgboost)
@@ -531,20 +561,30 @@ def run_paper_session(
     logger.info("running %s session rows=%s", mode, len(rows))
     if settings.governance.require_active_profile:
         symbol_profiles, active_report = resolve_active_profiles(settings)
+        governed_symbols = _governed_operation_symbols(settings)
         invalid = {
             symbol: payload["reasons"]
             for symbol, payload in active_report["symbols"].items()
-            if not payload["ok"] and symbol in set(settings.trading.symbols)
+            if not payload["ok"] and symbol in governed_symbols
         }
         if invalid:
             logger.error("Invalid active profiles for operation: %s", invalid)
             return 2, run_dir
     else:
         symbol_profiles = load_symbol_strategy_profiles(settings)
-    threshold_by_symbol = {
-        symbol: max(reference.threshold, profile.threshold)
-        for symbol, profile in symbol_profiles.items()
-    }
+    threshold_by_symbol = resolve_threshold_by_symbol(reference.threshold, symbol_profiles)
+    evaluation_contract = build_evaluation_contract(
+        settings,
+        evaluation_mode=f"{mode}_operational_evaluation",
+        threshold_source="experiment_reference_threshold",
+        threshold=reference.threshold,
+        threshold_metric=reference.threshold_metric,
+        threshold_value=reference.threshold_value,
+        threshold_by_symbol=threshold_by_symbol,
+        profile_gating_mode="governed_active_profiles" if settings.governance.require_active_profile else "symbol_profile_enabled_states_and_sessions",
+        allowed_profile_states={"enabled", "caution"},
+        consistency_requires_equity_curve=True,
+    )
     session_config = PaperSessionConfig(
         mode=mode,
         threshold=reference.threshold,
@@ -566,6 +606,40 @@ def run_paper_session(
         execution_validator=execution_validator,
     )
     artifacts = run_paper_engine(session_config, rows, probabilities)
+    artifacts.run_report["training_contract_version"] = reference.training_contract_version or TRAINING_CONTRACT_VERSION
+    artifacts.run_report["evaluation_contract_version"] = EVALUATION_CONTRACT_VERSION
+    contract_hashes = {
+        "training_contract": reference.training_contract_hash,
+        "evaluation_contract": contract_fingerprint(evaluation_contract),
+        "bundle": contract_bundle_fingerprint(
+            reference.training_contract or {
+                "source": "experiment_reference",
+                "reference_run_dir": str(reference.run_dir),
+                "contract_hash": reference.training_contract_hash,
+            },
+            evaluation_contract,
+        ),
+    }
+    artifacts.run_report["contract_hashes"] = contract_hashes
+    artifacts.validation_report["contract_hashes"] = dict(contract_hashes)
+    common_provenance = build_artifact_provenance(
+        run_dir=run_dir,
+        source_run_id=reference.run_dir.name,
+        parent_run_id=reference.run_dir.name,
+        training_contract_version=reference.training_contract_version or TRAINING_CONTRACT_VERSION,
+        evaluation_contract_version=EVALUATION_CONTRACT_VERSION,
+        contract_hashes=contract_hashes,
+        correlation_keys={
+            "command": mode,
+            "experiment_run_id": reference.run_dir.name,
+        },
+        references={
+            "experiment_report_path": str(reference.report_path),
+            "model_path": str(reference.model_path),
+        },
+    )
+    artifacts.run_report = attach_artifact_provenance(artifacts.run_report, common_provenance)
+    artifacts.validation_report = attach_artifact_provenance(artifacts.validation_report, common_provenance)
     config_payload = {
         "risk": asdict(settings.risk),
         "trading": asdict(settings.trading),
@@ -581,9 +655,20 @@ def run_paper_session(
             "threshold": reference.threshold,
             "threshold_metric": reference.threshold_metric,
             "threshold_value": reference.threshold_value,
+            "training_contract_version": reference.training_contract_version,
+            "evaluation_contract_version": reference.evaluation_contract_version,
         },
+        "training_contract_version": reference.training_contract_version or TRAINING_CONTRACT_VERSION,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+        "training_contract": reference.training_contract or {
+            "source": "experiment_reference",
+            "reference_run_dir": str(reference.run_dir),
+            "contract_hash": reference.training_contract_hash,
+        },
+        "evaluation_contract": evaluation_contract,
+        "contract_hashes": contract_hashes,
     }
-    write_operational_artifacts(run_dir, artifacts, config_payload)
+    write_operational_artifacts(run_dir, artifacts, attach_artifact_provenance(config_payload, common_provenance))
     logger.info(
         "%s complete closed_trades=%s blocked=%s run_dir=%s",
         mode,

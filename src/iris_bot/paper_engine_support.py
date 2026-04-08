@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, Sequence
 
-from iris_bot.backtest import (
-    _commission_usd,
-    _entry_execution_price,
-    build_instrument,
-)
+from iris_bot.backtest_pricing import build_instrument, commission_usd, entry_execution_price
 from iris_bot.config import BacktestConfig, RiskConfig
 from iris_bot.operational import (
     AccountState,
@@ -149,12 +145,11 @@ def execute_entry(
     """Executes a pending entry signal. Returns a rejection reason, or None on success."""
     symbol_exit_profiles = config.symbol_exit_profiles or {}
     symbol_strategy_profiles = config.symbol_strategy_profiles or {}
-    threshold_by_symbol = config.threshold_by_symbol or {}
     dynamic_exit_config = config.dynamic_exit_config
     execution_validator: ExecutionValidator | None = config.execution_validator
 
     instrument = build_instrument(row.symbol, config.backtest)
-    entry_price = _entry_execution_price(row.open, pending["signal"], instrument, config.backtest)
+    entry_price = entry_execution_price(row.open, pending["signal"], instrument, config.backtest)
     symbol_profile = symbol_exit_profiles.get(row.symbol)
     strategy_profile = symbol_strategy_profiles.get(row.symbol)
     profile_trace = symbol_profile_trace(strategy_profile)
@@ -225,7 +220,7 @@ def execute_entry(
             return decision.reason
         add_event(events, "order_simulated", row, "accepted", "dry_run", details)
 
-    commission_entry = _commission_usd(volume_lots, config.backtest)
+    commission_entry = commission_usd(volume_lots, config.backtest)
     state.open_positions[row.symbol] = PaperPosition(
         symbol=row.symbol,
         timeframe=row.timeframe,

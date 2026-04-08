@@ -6,6 +6,7 @@ from pathlib import Path
 from iris_bot.config import load_settings
 from iris_bot.demo_live_probe import run_demo_live_probe
 from iris_bot.mt5 import BrokerSnapshot, MT5Client, OrderResult
+from iris_bot.resilient import build_runtime_state_path, restore_runtime_state
 
 
 class _FakeTick:
@@ -56,7 +57,7 @@ def _settings(tmp_path: Path):
     return replace(
         settings,
         mt5=replace(settings.mt5, enabled=True),
-        data=replace(settings.data, runs_dir=tmp_path / "runs"),
+        data=replace(settings.data, runs_dir=tmp_path / "runs", runtime_dir=tmp_path / "runtime"),
         trading=replace(settings.trading, symbols=("EURUSD",)),
     )
 
@@ -72,6 +73,14 @@ def test_demo_live_probe_succeeds_and_writes_report(tmp_path: Path) -> None:
     assert report.opened_position is not None
     assert report.close_order_result is not None
     assert (run_dir / "demo_live_probe_report.json").exists()
+    assert (run_dir / "demo_live_probe_runtime_evidence.json").exists()
+    restored, restore_report = restore_runtime_state(build_runtime_state_path(settings), require_clean=False)
+    assert restore_report.ok is True
+    assert restored is not None
+    assert len(restored.closed_positions) == 1
+    assert restored.closed_positions[0].symbol == "EURUSD"
+    assert restored.closed_positions[0].exit_reason == "demo_live_probe_close"
+    assert restored.current_session_status.mode == "demo_live_probe"
 
 
 def test_demo_live_probe_blocks_non_demo_accounts(tmp_path: Path) -> None:

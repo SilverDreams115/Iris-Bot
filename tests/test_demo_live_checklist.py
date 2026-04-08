@@ -56,8 +56,12 @@ def _write_probe_report(settings, ok: bool, reason: str = "ok") -> None:
     )
 
 
-def test_demo_live_checklist_not_ready_without_probe(tmp_path: Path) -> None:
+def test_demo_live_checklist_not_ready_without_probe(tmp_path: Path, monkeypatch) -> None:
     settings = _settings(tmp_path)
+    monkeypatch.setattr(
+        "iris_bot.demo_live_checklist.generate_demo_execution_readiness_report",
+        lambda _settings: {"decision": "ready_for_demo_guarded"},
+    )
 
     report = generate_demo_live_checklist_report(
         settings,
@@ -73,7 +77,7 @@ def test_demo_live_checklist_ready_with_connectivity_and_probe(tmp_path: Path, m
     _write_probe_report(settings, ok=True)
     monkeypatch.setattr(
         "iris_bot.demo_live_checklist.generate_demo_execution_readiness_report",
-        lambda _settings: {"decision": "ready_for_next_phase"},
+        lambda _settings: {"decision": "ready_for_demo_guarded"},
     )
 
     report = generate_demo_live_checklist_report(

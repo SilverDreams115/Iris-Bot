@@ -37,6 +37,7 @@ class MT5Config:
     history_bars: int = 1500
     magic_number: int = 20260401
     comment_tag: str = "IRIS-Bot"
+    ownership_mode: str = "strict"
     reconcile_symbols_only: bool = True
 
 
@@ -130,6 +131,7 @@ class EnduranceConfig:
 @dataclass(frozen=True)
 class GovernanceConfig:
     registry_filename: str = "strategy_profile_registry.json"
+    policy_filename: str = "governance_policy.json"
     target_symbol: str = ""
     target_profile_id: str = ""
     promotion_target_state: str = "approved_demo"
@@ -205,6 +207,8 @@ class LabelingConfig:
     take_profit_pct: float = 0.0020
     stop_loss_pct: float = 0.0020
     allow_no_trade: bool = True
+    timeout_handling_mode: str = "directional"
+    timeout_direction_min_barrier_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -309,7 +313,9 @@ class DemoExecutionConfig:
     enabled: bool = False
     target_symbol: str = ""
     max_orders_per_run: int = 1
-    auto_close_after_entry: bool = True
+    # False = position lives under TP/SL (correct for forward demo series).
+    # True = close immediately after open (probe/smoke round-trip verification only).
+    auto_close_after_entry: bool = False
     require_explicit_activation: bool = True
     deviation_points: int = 20
     registry_filename: str = "demo_execution_registry.json"

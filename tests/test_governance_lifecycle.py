@@ -9,19 +9,22 @@ from iris_bot.config import MT5Config, load_settings
 from iris_bot.governance import (
     active_strategy_status,
     diagnose_profile_activation,
+    ingest_governance_evidence,
     load_strategy_profile_registry,
     promote_strategy_profile,
     review_approved_demo_readiness,
     resolve_active_profile_entry,
     rollback_strategy_profile,
+    save_strategy_profile_registry,
     validate_strategy_profiles,
 )
+from iris_bot.evidence_store import evidence_store_status
 from iris_bot.lifecycle import reconcile_lifecycle_records, run_lifecycle_reconciliation
 from iris_bot.operational import AccountState, PaperEngineState, atomic_write_json
 from iris_bot.paper import load_paper_context, run_paper_engine, PaperSessionConfig
 from iris_bot.processed_dataset import ProcessedRow
 from iris_bot.symbol_endurance import _endurance_consistency, run_symbol_endurance
-from iris_bot.symbols import write_symbol_strategy_profiles
+from iris_bot.symbols import default_symbol_strategy_profile, write_symbol_strategy_profiles
 
 
 def _settings(tmp_path: Path, monkeypatch):
@@ -217,6 +220,63 @@ def test_run_symbol_endurance_filters_enabled_symbols(tmp_path: Path, monkeypatc
     assert payload["symbols"]["EURUSD"]["cycles_completed"] == 3
     assert payload["symbols"]["EURUSD"]["source_of_truth"] == "health_report.cycles"
     assert payload["symbols"]["EURUSD"]["consistency_reports"][0]["ok"] is True
+
+
+def test_default_mt5_ownership_mode_is_strict(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path, monkeypatch)
+    assert settings.mt5.ownership_mode == "strict"
+
+
+def test_ingest_governance_evidence_populates_canonical_store(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path, monkeypatch)
+    object.__setattr__(settings, "project_root", tmp_path)
+    registry = {
+        "profiles": {
+            "EURUSD": [
+                {
+                    "profile_id": "eurusd_approved",
+                    "promotion_state": "approved_demo",
+                    "enablement_state": "enabled",
+                    "checksum": "abc",
+                    "created_at": "2026-04-06T00:00:00+00:00",
+                    "source_run_id": "20260406T000000Z_strategy_profile_promotion",
+                    "symbol": "EURUSD",
+                    "model_variant": "global_model",
+                    "promotion_reason": "test",
+                    "rollback_target": None,
+                    "profile_payload": {
+                        "symbol": "EURUSD",
+                        "profile_id": "eurusd_approved",
+                        "promotion_state": "approved_demo",
+                        "enabled_state": "enabled",
+                        "enabled": True,
+                        "promotion_reason": "test",
+                        "rollback_target": None,
+                    },
+                }
+            ]
+        },
+        "active_profiles": {"EURUSD": "eurusd_approved"},
+    }
+    import hashlib
+    import json as _json
+
+    payload = dict(registry["profiles"]["EURUSD"][0]["profile_payload"])
+    for key in ("profile_id", "promotion_state", "promotion_reason", "rollback_target"):
+        payload.pop(key, None)
+    registry["profiles"]["EURUSD"][0]["checksum"] = hashlib.sha256(_json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    save_strategy_profile_registry(settings, registry)
+
+    _write_lifecycle_artifact(settings, "20260406T010000Z", "EURUSD", critical=0)
+    _write_stability_artifact(settings, "20260406T020000Z", "EURUSD", decision="go")
+
+    assert ingest_governance_evidence(settings) == 0
+    status = evidence_store_status(settings)
+    assert status["by_artifact_type"]["lifecycle_reconciliation"] >= 1
+    assert status["by_artifact_type"]["symbol_stability"] >= 1
+    latest_keys = status["latest_per_key"]
+    assert "lifecycle_reconciliation__global" in latest_keys
+    assert "symbol_stability__EURUSD" in latest_keys
 
 
 def test_endurance_consistency_detects_cycle_mismatch(tmp_path: Path) -> None:
@@ -537,6 +597,22 @@ def test_review_approved_demo_readiness_never_promotes_usdjpy(tmp_path: Path, mo
     assert "symbol_out_of_scope_for_promotion" in payload["symbols"]["USDJPY"]["reasons"]
 
 
+def test_review_approved_demo_readiness_artifact_includes_policy_provenance(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path, monkeypatch)
+    write_symbol_strategy_profiles(settings, {}, {"EURUSD": {"enabled_state": "enabled", "enabled": True}})
+    _write_validation_artifacts(settings, "20260401T000000Z", {"EURUSD": "enabled"})
+    assert validate_strategy_profiles(settings) == 0
+    _write_stability_artifact(settings, "20260401T010000Z", "EURUSD", decision="go")
+    _write_lifecycle_artifact(settings, "20260401T020000Z", "EURUSD", critical=0)
+    settings = replace(settings, governance=replace(settings.governance, target_symbol="EURUSD"))
+    assert review_approved_demo_readiness(settings) == 0
+    latest = sorted(settings.data.runs_dir.glob("*_review_approved_demo_readiness"))[-1]
+    raw = json.loads((latest / "approved_demo_readiness_report.json").read_text(encoding="utf-8"))
+    assert raw["provenance"]["correlation_keys"]["command"] == "review_approved_demo_readiness"
+    assert raw["provenance"]["policy_version"] == "governance_policy.v1"
+    assert raw["provenance"]["references"]["registry_path"].endswith("strategy_profile_registry.json")
+
+
 def test_checksum_mismatch_blocks_active_profile_resolution(tmp_path: Path, monkeypatch) -> None:
     settings = _settings(tmp_path, monkeypatch)
     write_symbol_strategy_profiles(settings, {}, {"EURUSD": {"enabled_state": "enabled", "enabled": True}})
@@ -615,6 +691,67 @@ def test_load_paper_context_blocks_invalid_active_profile(tmp_path: Path, monkey
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "Invalid active profiles for operation" in str(exc)
+
+
+def test_load_paper_context_ignores_deliberately_blocked_symbol_without_active_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path, monkeypatch)
+    settings = replace(settings, trading=replace(settings.trading, symbols=("EURUSD", "USDJPY")))
+    registry = {
+        "profiles": {
+            "EURUSD": [{
+                "profile_id": "EURUSD-approved",
+                "symbol": "EURUSD",
+                "created_at": "2026-04-01T00:00:00+00:00",
+                "promotion_state": "approved_demo",
+                "promotion_reason": "test",
+                "checksum": "e3b0c44298fc1c149afbf4c8996fb924",
+                "profile_payload": {
+                    "enabled_state": "enabled",
+                },
+            }],
+        },
+        "active_profiles": {
+            "EURUSD": "EURUSD-approved",
+        },
+    }
+    from iris_bot.governance import save_strategy_profile_registry
+
+    save_strategy_profile_registry(settings, registry)
+
+    class FakeReference:
+        test_start_timestamp = "2026-01-01T00:00:00"
+        test_end_timestamp = "2026-01-01T00:15:00"
+        model_path = Path("/tmp/fake-model.json")
+        feature_names = ("atr_5",)
+
+    class FakeDataset:
+        rows = [
+            ProcessedRow(datetime(2026, 1, 1, 0, 0, 0), "EURUSD", "M15", 1.10, 1.11, 1.09, 1.105, 100.0, 1, "x", "2026-01-01T00:15:00", {"atr_5": 0.001}),
+        ]
+
+    monkeypatch.setattr("iris_bot.paper._locate_experiment_reference", lambda settings: FakeReference())
+    monkeypatch.setattr("iris_bot.paper.load_processed_dataset", lambda *args, **kwargs: FakeDataset())
+    monkeypatch.setattr(
+        "iris_bot.paper.resolve_active_profiles",
+        lambda settings: (
+            {"EURUSD": default_symbol_strategy_profile(settings, "EURUSD")},
+            {
+                "symbols": {
+                    "EURUSD": {"ok": True, "reasons": []},
+                    "USDJPY": {"ok": False, "reasons": ["no_active_profile_registered"]},
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr("iris_bot.paper.compute_signal_probabilities", lambda *args, **kwargs: [{1: 0.8, 0: 0.1, -1: 0.1}])
+    monkeypatch.setattr("iris_bot.paper.XGBoostMultiClassModel.load", lambda self, path: None)
+
+    reference, rows, probabilities = load_paper_context(settings)
+    assert reference.model_path == Path("/tmp/fake-model.json")
+    assert len(rows) == 1
+    assert probabilities[0][1] == 0.8
 
 
 def test_diagnose_profile_activation_writes_reports(tmp_path: Path, monkeypatch) -> None:
@@ -703,6 +840,28 @@ def test_reconcile_lifecycle_records_classifies_core_mismatches() -> None:
     assert payload["mismatch_counts"]["partial_fill_real"] == 1
 
 
+def test_reconcile_lifecycle_records_accepts_recent_closed_trade_evidence() -> None:
+    local_intents = [
+        {
+            "symbol": "EURUSD",
+            "signal_timestamp": "2026-01-01T00:00:00+00:00",
+            "side": "buy",
+            "volume_lots": 0.01,
+            "local_closed_trade": True,
+            "exit_timestamp": "2026-01-01T00:05:00+00:00",
+            "exit_reason": "demo_live_probe_close",
+        }
+    ]
+    broker_trace = {
+        "orders": [{"ticket": 10, "symbol": "EURUSD", "volume_initial": 0.01, "volume_current": 0.01}],
+        "deals": [{"ticket": 100, "order": 10, "symbol": "EURUSD", "volume": 0.01}],
+        "positions": [],
+    }
+    payload = reconcile_lifecycle_records(local_intents, broker_trace)
+    assert payload["critical_mismatch_count"] == 0
+    assert payload["mismatch_counts"] == {}
+
+
 def test_run_lifecycle_reconciliation_writes_reports(tmp_path: Path, monkeypatch) -> None:
     settings = _settings(tmp_path, monkeypatch)
     state = PaperEngineState(account_state=AccountState(1000.0, 1000.0, 1000.0))
@@ -715,6 +874,46 @@ def test_run_lifecycle_reconciliation_writes_reports(tmp_path: Path, monkeypatch
     exit_code, run_dir = run_lifecycle_reconciliation(settings, client_factory=lambda: LifecycleFakeClient(payload))
     assert exit_code == 0
     assert (run_dir / "lifecycle_reconciliation_report.json").exists()
+
+
+def test_run_lifecycle_reconciliation_does_not_promote_audit_visible_scope_only_records(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path, monkeypatch)
+    state = PaperEngineState(account_state=AccountState(1000.0, 1000.0, 1000.0))
+    state.pending_intents = []
+    atomic_write_json(
+        settings.data.runtime_dir / settings.operational.persistence_state_filename,
+        {"saved_at": "2026-01-01T00:00:00", "state": state.to_dict(), "latest_broker_sync_result": {}},
+    )
+    payload = {
+        "connected": True,
+        "orders": [],
+        "deals": [],
+        "positions": [],
+        "scope_report": {
+            "ownership_filter_active": True,
+            "ownership_mode": "strict",
+            "ownership_policy_version": 1,
+            "audit_visible_positions": [
+                {
+                    "symbol": "EURUSD",
+                    "ticket": 999,
+                    "owned_by_bot": False,
+                    "in_symbol_scope": True,
+                    "visible_for_audit": True,
+                    "ownership_reason": "symbol_scope_only",
+                }
+            ],
+            "audit_visible_orders": [],
+            "audit_visible_deals": [],
+        },
+    }
+
+    exit_code, run_dir = run_lifecycle_reconciliation(settings, client_factory=lambda: LifecycleFakeClient(payload))
+
+    assert exit_code == 0
+    report = read_artifact_payload(run_dir / "lifecycle_reconciliation_report.json", expected_type="lifecycle_reconciliation")
+    assert report["critical_mismatch_count"] == 0
+    assert report["scope_report"]["audit_visible_positions"][0]["ownership_reason"] == "symbol_scope_only"
 
 
 def test_run_lifecycle_reconciliation_blocks_when_connect_fails(tmp_path: Path, monkeypatch) -> None:

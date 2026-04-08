@@ -38,6 +38,8 @@ def _reconciliation_scope_report(settings: Settings) -> dict[str, Any]:
         return {
             "ok": True,
             "ownership_filter_active": True,
+            "ownership_mode": settings.mt5.ownership_mode,
+            "ownership_policy_version": 1,
             "magic_number": settings.mt5.magic_number,
             "comment_tag": settings.mt5.comment_tag,
             "reconcile_symbols_only": settings.mt5.reconcile_symbols_only,

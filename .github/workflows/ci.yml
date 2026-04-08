@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: .venv/bin/python -m ruff check .
+
+      - name: Mypy
+        run: .venv/bin/python -m mypy
+
+      - name: Pytest
+        run: .venv/bin/python -m pytest
+
+      - name: Smoke
+        run: .venv/bin/python -m iris_bot.main --help

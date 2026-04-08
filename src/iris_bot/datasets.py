@@ -1,11 +1,10 @@
 from __future__ import annotations
-
-import json
 from dataclasses import dataclass, asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
 from iris_bot.data import Bar, write_bars
+from iris_bot.durable_io import durable_write_json
 
 
 @dataclass(frozen=True)
@@ -40,5 +39,5 @@ def write_dataset_bundle(
         history_bars_requested=history_bars_requested,
         extra=extra or {},
     )
-    metadata_path.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    durable_write_json(metadata_path, asdict(manifest))
     return manifest

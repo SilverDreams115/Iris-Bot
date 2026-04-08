@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "policy_version": "governance_policy.v1",
+  "symbol_rules": {
+    "USDJPY": {
+      "rule_id": "symbol_out_of_scope_for_promotion",
+      "promotion_review": "block",
+      "activation_readiness": "blocked_out_of_scope",
+      "portfolio_eligibility": "deliberately_blocked",
+      "decision_reason": "insufficient_edge_detected_in_research_phase"
+    }
+  }
+}

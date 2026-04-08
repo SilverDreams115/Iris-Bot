@@ -15,6 +15,7 @@ No operational layer is touched. No model is promoted without earning it.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -25,7 +26,10 @@ from iris_bot.artifacts import wrap_artifact
 from iris_bot.backtest import run_backtest_engine
 from iris_bot.config import LabelingConfig, Settings
 from iris_bot.data import load_bars
+from iris_bot.demo_execution_registry import default_demo_execution_registry, load_demo_execution_registry, save_demo_execution_registry
+from iris_bot.governance_active import resolve_active_profile_entry
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
+from iris_bot.model_artifacts import build_model_artifact_manifest, model_artifact_dir, write_model_artifact_manifest
 from iris_bot.processed_dataset import FEATURE_NAMES_BASE, ProcessedRow, build_processed_dataset
 from iris_bot.splits import temporal_train_validation_test_split
 from iris_bot.thresholds import apply_probability_threshold, select_threshold_from_probabilities
@@ -143,6 +147,74 @@ _MIN_WF_TEST_ROWS = 5
 _MIN_TRADES_FOR_ECONOMIC_THRESHOLD = 3
 
 
+def _runtime_focus_symbol() -> str:
+    override = os.getenv("IRIS_SYMBOL_FOCUS_REWORK_SYMBOL", "").strip().upper()
+    return override or FOCUS_SYMBOL
+
+
+def _runtime_secondary_symbol() -> str:
+    focus = _runtime_focus_symbol()
+    if focus == FOCUS_SYMBOL:
+        return SECONDARY_SYMBOL
+    if focus == SECONDARY_SYMBOL:
+        return FOCUS_SYMBOL
+    return SECONDARY_SYMBOL
+
+
+def _variant_specs_for_focus_symbol(focus_symbol: str) -> list[dict[str, Any]]:
+    if focus_symbol == "EURUSD":
+        return [
+            dict(_VARIANTS[0]),
+            {
+                "variant_id": "V3_horizon_12_only",
+                "hypothesis": "Single next intervention after falsifying threshold-only: extend label horizon "
+                              "from 8 to 12 bars while keeping TP/SL, features, and threshold-selection "
+                              "contract unchanged. Tests whether EURUSD's WF PF deficit is mainly premature "
+                              "timeout compression rather than thresholding.",
+                "label_tp_pct": 0.0020,
+                "label_sl_pct": 0.0020,
+                "label_horizon_bars": 12,
+                "feature_set": "full",
+                "threshold_metric": "macro_f1",
+            },
+            {
+                "variant_id": "V4_exit_risk_only",
+                "hypothesis": "Exit/risk-only intervention after falsifying threshold-only and horizon-only. "
+                              "Labels, horizon, features, and threshold unchanged from V1_baseline. "
+                              "Disables ATR-amplified stops (use_atr_stops=False) so SL and TP remain at "
+                              "their fixed-floor values (0.20% SL, 0.30% TP) regardless of realised ATR. "
+                              "Hypothesis: high-vol folds 7 and 12 are catastrophic because ATR-based SL "
+                              "reaches 0.5-0.8% while the model is trained only on 0.2% barriers; "
+                              "decoupling backtest exits from ATR removes that mismatch.",
+                "label_tp_pct": 0.0020,
+                "label_sl_pct": 0.0020,
+                "label_horizon_bars": 8,
+                "feature_set": "full",
+                "threshold_metric": "macro_f1",
+                "use_atr_stops": False,
+            },
+        ]
+    return [dict(item) for item in _VARIANTS]
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Feature utilities
 # ---------------------------------------------------------------------------
@@ -162,7 +234,8 @@ def _build_symbol_rows(settings: Settings, label_cfg: LabelingConfig) -> list[Pr
     if not bars:
         raise FileNotFoundError(f"No bars at {settings.data.raw_dataset_path}")
     dataset = build_processed_dataset(bars, label_cfg)
-    rows = [r for r in dataset.rows if r.symbol == FOCUS_SYMBOL and r.timeframe == settings.trading.primary_timeframe]
+    focus_symbol = _runtime_focus_symbol()
+    rows = [r for r in dataset.rows if r.symbol == focus_symbol and r.timeframe == settings.trading.primary_timeframe]
     rows.sort(key=lambda r: r.timestamp)
     return rows
 
@@ -199,9 +272,9 @@ def _select_threshold_economic(
             exit_policy_config=settings.exit_policy,
             dynamic_exit_config=settings.dynamic_exits,
         )
-        if int(metrics.get("total_trades", 0)) < min_trades:
+        if _safe_int(metrics.get("total_trades")) < min_trades:
             continue
-        expectancy = float(metrics.get("expectancy_usd", float("-inf")))
+        expectancy = _safe_float(metrics.get("expectancy_usd"), float("-inf"))
         if expectancy > best_expectancy:
             best_expectancy = expectancy
             best_threshold = threshold
@@ -301,11 +374,13 @@ def _evaluate_rows(
     no_trade_ratio = Counter(predictions).get(0, 0) / len(predictions) if predictions else 1.0
     return {
         "row_count": len(rows),
-        "trade_count": int(metrics["total_trades"]),
-        "net_pnl_usd": float(metrics["net_pnl_usd"]),
-        "expectancy_usd": float(metrics["expectancy_usd"]),
-        "profit_factor": float(metrics["profit_factor"]),
-        "max_drawdown_usd": float(metrics["max_drawdown_usd"]),
+        "trade_count": _safe_int(metrics.get("total_trades")),
+        "net_pnl_usd": _safe_float(metrics.get("net_pnl_usd")),
+        "expectancy_usd": _safe_float(metrics.get("expectancy_usd")),
+        "profit_factor": _safe_float(metrics.get("profit_factor")),
+        "gross_profit_usd": _safe_float(metrics.get("gross_profit_usd")),
+        "gross_loss_usd": _safe_float(metrics.get("gross_loss_usd")),
+        "max_drawdown_usd": _safe_float(metrics.get("max_drawdown_usd")),
         "no_trade_ratio": no_trade_ratio,
         "threshold": threshold,
     }
@@ -368,6 +443,17 @@ def _walk_forward_variant(
     drawdowns = [float(s["max_drawdown_usd"]) for s in valid]
     trade_counts = [int(s["trade_count"]) for s in valid]
 
+    # Trade-weighted PF (ADR-003): sum(gross_profit) / sum(gross_loss) across all folds.
+    # Immune to zero-trade folds (PF=0 inflation) and PF=999 outlier folds (no-loss inflation).
+    total_gross_profit = sum(float(s.get("gross_profit_usd", 0.0)) for s in valid)
+    total_gross_loss = sum(float(s.get("gross_loss_usd", 0.0)) for s in valid)
+    if total_gross_loss > 0.0:
+        trade_weighted_pf = total_gross_profit / total_gross_loss
+    elif total_gross_profit > 0.0:
+        trade_weighted_pf = 999.0
+    else:
+        trade_weighted_pf = 0.0
+
     positive_folds = sum(1 for p in net_pnls if p > 0.0)
     valid_count = len(valid)
 
@@ -381,6 +467,7 @@ def _walk_forward_variant(
             "total_net_pnl_usd": sum(net_pnls),
             "mean_net_pnl_usd": mean(net_pnls) if net_pnls else 0.0,
             "mean_profit_factor": mean(pfs) if pfs else 0.0,
+            "trade_weighted_profit_factor": trade_weighted_pf,
             "mean_expectancy_usd": mean(expectancies) if expectancies else 0.0,
             "worst_fold_drawdown_usd": max(drawdowns) if drawdowns else 0.0,
             "mean_no_trade_ratio": mean(no_trades) if no_trades else 0.0,
@@ -543,7 +630,9 @@ def _apply_variant_gates(
         reasons.append("walk_forward_total_net_pnl_non_positive")
     if agg["mean_expectancy_usd"] <= 0.0:
         reasons.append("walk_forward_expectancy_non_positive")
-    if agg["mean_profit_factor"] < gate.min_profit_factor:
+    # ADR-003: gate uses trade_weighted_profit_factor (not arithmetic mean).
+    # Arithmetic mean is kept in aggregate for auditing but no longer gates approval.
+    if agg["trade_weighted_profit_factor"] < gate.min_profit_factor:
         reasons.append("walk_forward_profit_factor_below_floor")
     if positive_ratio < settings.strategy.min_positive_walkforward_ratio:
         reasons.append("walk_forward_positive_ratio_below_floor")
@@ -596,6 +685,12 @@ def _run_one_variant(
     )
     effective_settings = replace(settings, labeling=label_cfg)
 
+    # Exit/risk-only override: allow per-variant backtest exit configuration.
+    # Only use_atr_stops is supported; labels and model training are unchanged.
+    if "use_atr_stops" in spec:
+        effective_backtest = replace(settings.backtest, use_atr_stops=bool(spec["use_atr_stops"]))
+        effective_settings = replace(effective_settings, backtest=effective_backtest)
+
     rows = _build_symbol_rows(effective_settings, label_cfg)
     feature_names = _feature_names(pruned=(spec["feature_set"] == "pruned"))
 
@@ -639,6 +734,9 @@ def _run_one_variant(
             "stop_loss_pct": spec["label_sl_pct"],
             "horizon_bars": spec["label_horizon_bars"],
         },
+        "exit_config": {
+            "use_atr_stops": effective_settings.backtest.use_atr_stops,
+        },
         "label_diagnostic": label_diag,
         "threshold_report": threshold_report,
         "test_metrics": test_metrics,
@@ -663,9 +761,9 @@ def _compare_variants(variant_results: list[dict[str, Any]]) -> dict[str, Any]:
         wf = v["walk_forward"]["aggregate"]
         # Primary: test expectancy + WF expectancy + WF total PnL (scaled)
         return (
-            t["expectancy_usd"]
-            + wf["mean_expectancy_usd"]
-            + wf["total_net_pnl_usd"] / 100.0
+            _safe_float(t["expectancy_usd"])
+            + _safe_float(wf["mean_expectancy_usd"])
+            + _safe_float(wf["total_net_pnl_usd"]) / 100.0
         )
 
     decision_rank = {
@@ -691,6 +789,8 @@ def _compare_variants(variant_results: list[dict[str, Any]]) -> dict[str, Any]:
             "test_trades": v["test_metrics"]["trade_count"],
             "wf_total_pnl_usd": v["walk_forward"]["aggregate"]["total_net_pnl_usd"],
             "wf_mean_expectancy_usd": v["walk_forward"]["aggregate"]["mean_expectancy_usd"],
+            "wf_mean_pf": v["walk_forward"]["aggregate"]["mean_profit_factor"],
+            "wf_weighted_pf": v["walk_forward"]["aggregate"]["trade_weighted_profit_factor"],
             "wf_positive_folds": v["walk_forward"]["positive_folds"],
             "wf_valid_folds": v["walk_forward"]["valid_folds"],
             "threshold": v["test_metrics"]["threshold"],
@@ -712,9 +812,46 @@ def _compare_variants(variant_results: list[dict[str, Any]]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _symbol_selection_justification() -> dict[str, Any]:
+    focus_symbol = _runtime_focus_symbol()
+    secondary_symbol = _runtime_secondary_symbol()
+    if focus_symbol == "EURUSD":
+        return {
+            "focus_symbol": focus_symbol,
+            "secondary_symbol": secondary_symbol,
+            "excluded": ["USDJPY", "AUDUSD"],
+            "justification": {
+                "EURUSD": {
+                    "selected_as": "primary_focus",
+                    "reasoning": [
+                        "Only remaining blocker is walk-forward profit_factor below floor while test gates already pass.",
+                        "Test PF is above floor and walk-forward total PnL / expectancy are already positive.",
+                        "Damage is concentrated in a few marginal folds plus several zero-trade folds, pointing to thresholding rather than broad edge absence.",
+                        "Minimum legitimate intervention is threshold-objective reevaluation before touching labels, exits, or horizons.",
+                    ],
+                },
+                "GBPUSD": {
+                    "selected_as": "secondary_monitor",
+                    "reasoning": [
+                        "Still rejected by multiple gates, so it is not the minimal path to unlock demo execution in this phase.",
+                    ],
+                },
+                "USDJPY": {
+                    "selected_as": "excluded",
+                    "reasoning": [
+                        "Operational and quant blockers remain outside the minimum path for demo unlock.",
+                    ],
+                },
+                "AUDUSD": {
+                    "selected_as": "excluded",
+                    "reasoning": [
+                        "Broader edge deficit remains; not suitable for focused minimum rehabilitation.",
+                    ],
+                },
+            },
+        }
     return {
-        "focus_symbol": FOCUS_SYMBOL,
-        "secondary_symbol": SECONDARY_SYMBOL,
+        "focus_symbol": focus_symbol,
+        "secondary_symbol": secondary_symbol,
         "excluded": ["USDJPY", "AUDUSD"],
         "justification": {
             "GBPUSD": {
@@ -765,6 +902,7 @@ def run_audit_symbol_signal(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "audit_symbol_signal")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
+    focus_symbol = _runtime_focus_symbol()
     bars = load_bars(settings.data.raw_dataset_path)
     if not bars:
         logger.error("No bars found at %s", settings.data.raw_dataset_path)
@@ -772,7 +910,7 @@ def run_audit_symbol_signal(settings: Settings) -> int:
     dataset = build_processed_dataset(bars, settings.labeling)
     focus_rows = [
         r for r in dataset.rows
-        if r.symbol == FOCUS_SYMBOL and r.timeframe == settings.trading.primary_timeframe
+        if r.symbol == focus_symbol and r.timeframe == settings.trading.primary_timeframe
     ]
     focus_rows.sort(key=lambda r: r.timestamp)
 
@@ -802,7 +940,7 @@ def run_audit_symbol_signal(settings: Settings) -> int:
         })
 
     payload = {
-        "focus_symbol": FOCUS_SYMBOL,
+        "focus_symbol": focus_symbol,
         "symbol_selection": selection_justification,
         "label_diagnostic": label_diag,
         "feature_redundancy": feature_redundancy,
@@ -812,7 +950,7 @@ def run_audit_symbol_signal(settings: Settings) -> int:
         "primary_timeframe": settings.trading.primary_timeframe,
     }
     write_json_report(run_dir, "symbol_focus_diagnostic_report.json", wrap_artifact("symbol_focus_diagnostic", payload))
-    logger.info("audit_symbol_signal focus=%s rows=%d run_dir=%s", FOCUS_SYMBOL, len(focus_rows), run_dir)
+    logger.info("audit_symbol_signal focus=%s rows=%d run_dir=%s", focus_symbol, len(focus_rows), run_dir)
     return 0
 
 
@@ -821,8 +959,10 @@ def run_compare_symbol_variants(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "compare_symbol_variants")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
+    focus_symbol = _runtime_focus_symbol()
+    variant_specs = _variant_specs_for_focus_symbol(focus_symbol)
     variant_results: list[dict[str, Any]] = []
-    for spec in _VARIANTS:
+    for spec in variant_specs:
         logger.info("Running variant %s ...", spec["variant_id"])
         result = _run_one_variant(settings, spec)
         variant_results.append(result)
@@ -840,7 +980,7 @@ def run_compare_symbol_variants(settings: Settings) -> int:
         run_dir,
         "structural_rework_matrix_report.json",
         wrap_artifact("structural_variant_comparison", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "variant_count": len(variant_results),
             "variants": variant_results,
             "comparison": comparison,
@@ -857,6 +997,7 @@ def run_compare_symbol_variants(settings: Settings) -> int:
 
 def run_evaluate_demo_execution_candidate(settings: Settings) -> int:
     """Load the most recent variant comparison and apply hard demo execution gates."""
+    focus_symbol = _runtime_focus_symbol()
     run_dir = build_run_directory(settings.data.runs_dir, "evaluate_demo_candidate")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
@@ -886,7 +1027,7 @@ def run_evaluate_demo_execution_candidate(settings: Settings) -> int:
         decision = "REJECT_FOR_DEMO_EXECUTION"
         reasons = ["no_valid_variant_found"]
         candidate_report: dict[str, Any] = {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "best_variant_id": None,
             "decision": decision,
             "reasons": reasons,
@@ -896,7 +1037,7 @@ def run_evaluate_demo_execution_candidate(settings: Settings) -> int:
         decision = best_variant.get("decision", "REJECT_FOR_DEMO_EXECUTION")
         reasons = best_variant.get("reasons", [])
         candidate_report = {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "best_variant_id": best_variant_id,
             "decision": decision,
             "approved_for_demo_execution": decision == "APPROVED_FOR_DEMO_EXECUTION",
@@ -918,7 +1059,7 @@ def run_evaluate_demo_execution_candidate(settings: Settings) -> int:
     )
     logger.info(
         "evaluate_demo_candidate symbol=%s decision=%s approved=%s run_dir=%s",
-        FOCUS_SYMBOL,
+        focus_symbol,
         decision,
         candidate_report.get("approved_for_demo_execution", False),
         run_dir,
@@ -926,14 +1067,124 @@ def run_evaluate_demo_execution_candidate(settings: Settings) -> int:
     return 0
 
 
+def _persist_focus_model_artifact(settings: Settings, focus_symbol: str, best_variant: dict[str, Any], source_run_dir: Path) -> str:
+    label_cfg = replace(
+        settings.labeling,
+        take_profit_pct=best_variant["label_config"]["take_profit_pct"],
+        stop_loss_pct=best_variant["label_config"]["stop_loss_pct"],
+        horizon_bars=best_variant["label_config"]["horizon_bars"],
+    )
+    effective_settings = replace(settings, labeling=label_cfg)
+    rows = _build_symbol_rows(effective_settings, label_cfg)
+    feature_names = _feature_names(pruned=(best_variant.get("feature_set") == "pruned"))
+    split = temporal_train_validation_test_split(
+        rows,
+        settings.split.train_ratio,
+        settings.split.validation_ratio,
+        settings.split.test_ratio,
+    )
+    model, threshold, threshold_report = _train_model(
+        effective_settings, split.train, split.validation, feature_names, str(best_variant["threshold_metric"])
+    )
+    active_status = resolve_active_profile_entry(effective_settings, focus_symbol)
+    base_profile_snapshot = (
+        asdict(active_status["resolved_profile"]) if active_status.get("resolved_profile") is not None else {}
+    )
+    base_profile_snapshot.setdefault("profile_id", active_status.get("active_profile_id", ""))
+    base_profile_snapshot.setdefault("promotion_state", active_status.get("promotion_state", ""))
+
+    artifact_dir = model_artifact_dir(effective_settings, focus_symbol)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    model_path = artifact_dir / "xgboost_model.json"
+    metadata_path = artifact_dir / "xgboost_metadata.json"
+    model.save(model_path, metadata_path, feature_names)
+    manifest = build_model_artifact_manifest(
+        settings=effective_settings,
+        symbol=focus_symbol,
+        model_path=model_path,
+        metadata_path=metadata_path,
+        feature_names=feature_names,
+        threshold=threshold,
+        threshold_metric=threshold_report["metric_name"],
+        threshold_value=threshold_report["metric_value"],
+        model_variant=str(best_variant["variant_id"]),
+        source_run_dir=str(source_run_dir),
+        base_profile_snapshot=base_profile_snapshot,
+        evaluation_summary={
+            "test": best_variant.get("test_metrics", {}),
+            "walk_forward": best_variant.get("walk_forward", {}).get("aggregate", {}),
+        },
+    )
+    return str(write_model_artifact_manifest(artifact_dir / "model_artifact_manifest.json", manifest))
+
+
+def _sync_demo_execution_registry_for_focus_symbol(
+    settings: Settings,
+    focus_symbol: str,
+    best_variant: dict[str, Any] | None,
+    manifest_path: str,
+) -> dict[str, Any]:
+    registry = load_demo_execution_registry(settings)
+    if not registry:
+        registry = default_demo_execution_registry()
+    symbols = dict(registry.get("symbols", {}))
+    active_status = resolve_active_profile_entry(settings, focus_symbol)
+    stop_policy = ""
+    target_policy = ""
+    resolved_profile = active_status.get("resolved_profile")
+    if resolved_profile is not None:
+        stop_policy = str(getattr(resolved_profile, "stop_policy", "") or "")
+        target_policy = str(getattr(resolved_profile, "target_policy", "") or "")
+
+    if best_variant is None:
+        entry = {
+            "symbol": focus_symbol,
+            "decision": "REJECT_FOR_DEMO_EXECUTION",
+            "approved_for_demo_execution": False,
+            "active_for_demo_execution": False,
+            "base_profile_id": active_status.get("active_profile_id", ""),
+            "base_promotion_state": active_status.get("promotion_state", ""),
+            "model_variant": "",
+            "threshold": 0.0,
+            "stop_policy": stop_policy,
+            "target_policy": target_policy,
+            "model_artifact_manifest_path": "",
+            "reasons": ["no_valid_variant_found"],
+        }
+    else:
+        entry = {
+            "symbol": focus_symbol,
+            "decision": best_variant.get("decision", "REJECT_FOR_DEMO_EXECUTION"),
+            "approved_for_demo_execution": best_variant.get("decision") == "APPROVED_FOR_DEMO_EXECUTION",
+            "active_for_demo_execution": False,
+            "base_profile_id": active_status.get("active_profile_id", ""),
+            "base_promotion_state": active_status.get("promotion_state", ""),
+            "model_variant": str(best_variant.get("variant_id", "")),
+            "threshold": float(best_variant.get("test_metrics", {}).get("threshold", 0.0) or 0.0),
+            "stop_policy": stop_policy,
+            "target_policy": target_policy,
+            "model_artifact_manifest_path": manifest_path,
+            "reasons": list(best_variant.get("reasons", [])),
+        }
+    symbols[focus_symbol] = entry
+    registry["symbols"] = symbols
+    if registry.get("active_symbol") == focus_symbol and not entry["approved_for_demo_execution"]:
+        registry["active_symbol"] = ""
+        registry["gate_open"] = False
+    save_demo_execution_registry(settings, registry)
+    return entry
+
+
 def run_symbol_structural_rework(settings: Settings) -> int:
     """Full rework pipeline: audit → variants → gates → all reports."""
     run_dir = build_run_directory(settings.data.runs_dir, "symbol_structural_rework")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
+    focus_symbol = _runtime_focus_symbol()
+    variant_specs = _variant_specs_for_focus_symbol(focus_symbol)
     # --- 1. Symbol selection justification ---
     selection = _symbol_selection_justification()
-    logger.info("Focus symbol: %s", FOCUS_SYMBOL)
+    logger.info("Focus symbol: %s", focus_symbol)
 
     # --- 2. Signal audit (no training) ---
     bars = load_bars(settings.data.raw_dataset_path)
@@ -943,7 +1194,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
     dataset = build_processed_dataset(bars, settings.labeling)
     focus_rows = [
         r for r in dataset.rows
-        if r.symbol == FOCUS_SYMBOL and r.timeframe == settings.trading.primary_timeframe
+        if r.symbol == focus_symbol and r.timeframe == settings.trading.primary_timeframe
     ]
     focus_rows.sort(key=lambda r: r.timestamp)
 
@@ -955,7 +1206,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         run_dir,
         "symbol_focus_diagnostic_report.json",
         wrap_artifact("symbol_focus_diagnostic", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "symbol_selection": selection,
             "label_diagnostic": label_diag,
             "feature_redundancy": feature_redundancy,
@@ -966,7 +1217,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
 
     # --- 3. Variant comparison matrix ---
     variant_results: list[dict[str, Any]] = []
-    for spec in _VARIANTS:
+    for spec in variant_specs:
         logger.info("Running variant %s ...", spec["variant_id"])
         result = _run_one_variant(settings, spec)
         variant_results.append(result)
@@ -987,7 +1238,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         run_dir,
         "structural_rework_matrix_report.json",
         wrap_artifact("structural_variant_comparison", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "variant_count": len(variant_results),
             "variants": variant_results,
             "comparison": comparison,
@@ -999,7 +1250,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         run_dir,
         "feature_signal_analysis_report.json",
         wrap_artifact("feature_signal_analysis", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "feature_redundancy": feature_redundancy,
             "pruned_features": list(_FEATURES_TO_PRUNE),
             "kept_features": _feature_names(pruned=True),
@@ -1013,7 +1264,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         run_dir,
         "label_exit_interaction_report.json",
         wrap_artifact("label_exit_interaction", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "baseline_label_config": {
                 "take_profit_pct": settings.labeling.take_profit_pct,
                 "stop_loss_pct": settings.labeling.stop_loss_pct,
@@ -1037,7 +1288,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
             run_dir,
             "walkforward_stability_report.json",
             wrap_artifact("walkforward_stability", {
-                "focus_symbol": FOCUS_SYMBOL,
+                "focus_symbol": focus_symbol,
                 "best_variant_id": best_variant_id,
                 "walk_forward": wf_data,
             }),
@@ -1059,7 +1310,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         run_dir,
         "threshold_trade_density_report.json",
         wrap_artifact("threshold_trade_density", {
-            "focus_symbol": FOCUS_SYMBOL,
+            "focus_symbol": focus_symbol,
             "threshold_reports": threshold_reports,
         }),
     )
@@ -1070,7 +1321,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
     improved_variants = [v["variant_id"] for v in variant_results if v.get("decision") == "IMPROVED_BUT_NOT_ENOUGH"]
 
     candidate_payload: dict[str, Any] = {
-        "focus_symbol": FOCUS_SYMBOL,
+        "focus_symbol": focus_symbol,
         "best_variant_id": best_variant_id,
         "best_decision": best_decision,
         "approved_for_demo_execution": best_decision == "APPROVED_FOR_DEMO_EXECUTION",
@@ -1087,7 +1338,7 @@ def run_symbol_structural_rework(settings: Settings) -> int:
     )
 
     recommendation: dict[str, Any] = {
-        "focus_symbol": FOCUS_SYMBOL,
+        "focus_symbol": focus_symbol,
         "best_variant": best_variant_id,
         "decision": best_decision,
         "approved_for_demo_execution": best_decision == "APPROVED_FOR_DEMO_EXECUTION",
@@ -1108,9 +1359,27 @@ def run_symbol_structural_rework(settings: Settings) -> int:
         wrap_artifact("structural_rework_recommendation", recommendation),
     )
 
+    manifest_path = ""
+    if best_variant and not best_variant.get("skipped"):
+        manifest_path = _persist_focus_model_artifact(settings, focus_symbol, best_variant, run_dir)
+    registry_entry = _sync_demo_execution_registry_for_focus_symbol(settings, focus_symbol, best_variant, manifest_path)
+    write_json_report(
+        run_dir,
+        "demo_execution_registry_update_report.json",
+        wrap_artifact(
+            "demo_execution_candidate",
+            {
+                "focus_symbol": focus_symbol,
+                "registry_entry": registry_entry,
+                "manifest_path": manifest_path,
+                "source_run_dir": str(run_dir),
+            },
+        ),
+    )
+
     logger.info(
         "symbol_structural_rework focus=%s best=%s decision=%s approved=%s run_dir=%s",
-        FOCUS_SYMBOL,
+        focus_symbol,
         best_variant_id,
         best_decision,
         best_decision == "APPROVED_FOR_DEMO_EXECUTION",

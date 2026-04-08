@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from iris_bot.config import Settings
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
-from iris_bot.mt5 import MT5Client, OrderRequest, OrderResult
+from iris_bot.mt5 import MT5Client, OrderRequest
+from iris_bot.operational import ClosedPaperTrade
+from iris_bot.resilient import build_runtime_state_path, fresh_state, persist_runtime_state, restore_runtime_state
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,85 @@ def _failure(
         close_order_result=close_order_result,
         remaining_positions=remaining_positions,
     )
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _position_value(position: dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = position.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _persist_probe_runtime_evidence(
+    settings: Settings,
+    *,
+    symbol: str,
+    open_result: dict[str, Any],
+    position: dict[str, Any],
+    close_result: dict[str, Any],
+    remaining_positions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runtime_state_path = build_runtime_state_path(settings)
+    restored_state, restore_report = restore_runtime_state(runtime_state_path, require_clean=False)
+    state = restored_state or fresh_state(settings.backtest.starting_balance_usd, "demo_live_probe")
+    entry_timestamp = str(position.get("time") or position.get("time_update") or _now_iso())
+    exit_timestamp = _now_iso()
+    signal_timestamp = str(open_result.get("request", {}).get("timestamp") or entry_timestamp)
+    state.closed_positions.append(
+        ClosedPaperTrade(
+            symbol=symbol,
+            timeframe=settings.trading.primary_timeframe,
+            direction=1 if int(position.get("type", 0)) == 0 else -1,
+            entry_timestamp=entry_timestamp,
+            exit_timestamp=exit_timestamp,
+            signal_timestamp=signal_timestamp,
+            entry_price=_position_value(position, "price_open", float(open_result.get("price", 0.0) or 0.0)),
+            exit_price=float(close_result.get("price", 0.0) or 0.0),
+            stop_loss_price=_position_value(position, "sl"),
+            take_profit_price=_position_value(position, "tp"),
+            volume_lots=_position_value(position, "volume", 0.01),
+            gross_pnl_usd=0.0,
+            net_pnl_usd=0.0,
+            total_commission_usd=0.0,
+            spread_cost_usd=0.0,
+            slippage_cost_usd=0.0,
+            exit_reason="demo_live_probe_close",
+            bars_held=0,
+            probability_long=0.0,
+            probability_short=0.0,
+            stop_policy="probe_static",
+            target_policy="probe_static",
+            stop_policy_details={"source": "demo_live_probe"},
+            target_policy_details={"source": "demo_live_probe"},
+            active_profile_id="demo_live_probe",
+            model_variant="demo_live_probe",
+            profile_source_run_id="demo_live_probe",
+            enablement_state="probe_only",
+            promotion_state="probe_only",
+        )
+    )
+    state.current_session_status.session_id = "demo_live_probe"
+    state.current_session_status.mode = "demo_live_probe"
+    state.current_session_status.status = "completed"
+    state.current_session_status.last_timestamp = exit_timestamp
+    state.latest_broker_snapshot = {
+        "symbol": symbol,
+        "remaining_positions": remaining_positions,
+        "probe_open_ticket": open_result.get("ticket"),
+        "probe_close_ticket": close_result.get("ticket"),
+    }
+    persist_runtime_state(runtime_state_path, state, {"probe": state.latest_broker_snapshot})
+    return {
+        "runtime_state_path": str(runtime_state_path),
+        "restore_ok": restore_report.ok,
+        "closed_positions_count": len(state.closed_positions),
+        "latest_session_status": asdict(state.current_session_status),
+    }
 
 
 def run_demo_live_probe(
@@ -266,6 +348,14 @@ def run_demo_live_probe(
             logger.error("demo_live_probe failed: close_order_rejected retcode=%s", close_result.retcode)
             return 7, run_dir, report
 
+        runtime_evidence = _persist_probe_runtime_evidence(
+            settings,
+            symbol=symbol,
+            open_result=open_result.to_dict(),
+            position=position,
+            close_result=close_result.to_dict(),
+            remaining_positions=remaining_positions,
+        )
         report = DemoLiveProbeReport(
             ok=True,
             status="completed",
@@ -280,6 +370,7 @@ def run_demo_live_probe(
             remaining_positions=remaining_positions,
         )
         write_json_report(run_dir, "demo_live_probe_report.json", report.to_dict())
+        write_json_report(run_dir, "demo_live_probe_runtime_evidence.json", runtime_evidence)
         logger.info(
             "demo_live_probe completed symbol=%s open_ticket=%s close_ticket=%s remaining_positions=%s",
             symbol,

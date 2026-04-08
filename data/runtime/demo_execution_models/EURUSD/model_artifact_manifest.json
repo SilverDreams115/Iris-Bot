@@ -1,10 +1,11 @@
 {
   "artifact_type": "model_artifact_manifest",
-  "checksum": "1a1e7d7fe4ef2c69f934738c2542da8802ea2607e2153da8a07a7d12b2dd0b0a",
+  "artifact_version": "model_artifact_manifest.v1",
+  "checksum": "86fc0153b879ca935db181563e6fc8d11703c9bfd77cbdb4e008645ff1691f20",
   "compatibility": {
     "loader": "load_model_artifact_manifest"
   },
-  "generated_at": "2026-04-06T04:44:23.020500+00:00",
+  "generated_at": "2026-04-07T22:32:09.062663+00:00",
   "payload": {
     "base_profile_snapshot": {
       "allow_long": true,
@@ -42,25 +43,30 @@
     },
     "evaluation_summary": {
       "test": {
-        "expectancy_usd": -0.10884285714354291,
-        "max_drawdown_usd": 46.48760000000823,
-        "net_pnl_usd": -3.0476000000192016,
-        "no_trade_ratio": 0.5405405405405406,
-        "profit_factor": 0.9453125560760082,
+        "expectancy_usd": 0.37902166666596315,
+        "gross_loss_usd": 36.49000000000828,
+        "gross_profit_usd": 45.58651999999138,
+        "max_drawdown_usd": 22.93000000000245,
+        "net_pnl_usd": 9.096519999983116,
+        "no_trade_ratio": 0.6216216216216216,
+        "profit_factor": 1.2492880241156765,
         "row_count": 296,
         "threshold": 0.4,
-        "trade_count": 28
+        "trade_count": 24
       },
       "walk_forward": {
-        "mean_expectancy_usd": -0.9274320702950517,
-        "mean_no_trade_ratio": 0.5955357142857143,
-        "mean_profit_factor": 0.7599647581315414,
-        "net_pnl_stddev": 13.831120917006578,
-        "total_net_pnl_usd": -96.15645104629152,
-        "worst_fold_drawdown_usd": 52.817465264844145
+        "mean_expectancy_usd": 0.04164573243791136,
+        "mean_net_pnl_usd": 1.800568163382861,
+        "mean_no_trade_ratio": 0.7044642857142857,
+        "mean_profit_factor": 0.976884469990901,
+        "net_pnl_stddev": 10.947616457967444,
+        "total_net_pnl_usd": 25.207954287360053,
+        "total_trades": 78,
+        "trade_weighted_profit_factor": 1.141491935974202,
+        "worst_fold_drawdown_usd": 25.475360000003775
       }
     },
-    "feature_count": 32,
+    "feature_count": 36,
     "feature_names": [
       "return_1",
       "return_3",
@@ -88,6 +94,10 @@
       "volume_zscore_20",
       "volume_percentile_20",
       "atr_regime_percentile",
+      "adx_14",
+      "trend_regime_flag",
+      "high_volatility_regime_flag",
+      "low_volatility_regime_flag",
       "session_asia",
       "session_london",
       "session_new_york",
@@ -96,21 +106,22 @@
       "currency_strength_rank"
     ],
     "metadata_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/EURUSD/xgboost_metadata.json",
-    "metadata_sha256": "fd57d0a1b1461d299322979893d7019c610e7dae5101c52fba529f7ca2406a83",
+    "metadata_sha256": "46e818e6db479e07adba4eea5d865088a4ed5d0fb9b7fef8b37f20905a00d5fd",
     "model_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/EURUSD/xgboost_model.json",
-    "model_sha256": "ddac56638d09459352f8dca42e25f8688cfe8d3e556077813f03ee359e0a5ddb",
-    "model_variant": "symbol_specific",
+    "model_sha256": "cb824eba9731f840a69e84fe30042bd507905526a8104e2a84d8099c28d5be64",
+    "model_variant": "V1_baseline",
     "runtime_compatibility": {
       "primary_timeframe": "M15",
       "stop_policy": "static",
       "target_policy": "static"
     },
     "schema_version": 1,
-    "source_run_dir": "/home/silver/projects/IRIS-Bot/runs/20260406T041027Z_experiment_matrix",
+    "source_run_dir": "/home/silver/projects/IRIS-Bot/runs/20260407T223150Z_symbol_structural_rework",
     "symbol": "EURUSD",
     "threshold": 0.4,
     "threshold_metric": "macro_f1",
-    "threshold_value": 0.2542732509079776
+    "threshold_value": 0.19878717730920134
   },
+  "provenance": {},
   "schema_version": 1
 }

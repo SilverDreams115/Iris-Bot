@@ -1,0 +1,154 @@
+{
+  "artifact_type": "symbol_stability",
+  "checksum": "0235eb43e74f5d63f9c1abba978bb4a724d6ff8bd66c70fb7b4e77c1e3264fac",
+  "compatibility": {},
+  "generated_at": "2026-04-01T19:46:58.014076+00:00",
+  "payload": {
+    "active_registry_profiles": {},
+    "enabled_symbol_count": 1,
+    "mode": "paper",
+    "symbols": {
+      "EURUSD": {
+        "alerts_by_severity": {
+          "critical": 0,
+          "error": 0,
+          "info": 0,
+          "warning": 210
+        },
+        "blocked_trades": 140,
+        "consistency_reports": [
+          {
+            "cycle_numbers": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "cycle_summary_count": 5,
+            "duplicate_cycle_count": 0,
+            "health_cycle_count": 5,
+            "mismatches": [],
+            "ok": true,
+            "reported_completed_cycles": 5,
+            "run_dir": "/home/silver/projects/IRIS-Bot/runs/20260401T194656Z_paper_soak",
+            "source_of_truth": "health_report.cycles"
+          }
+        ],
+        "cycle_health": [
+          {
+            "alerts_by_severity": {
+              "critical": 0,
+              "error": 0,
+              "info": 0,
+              "warning": 42
+            },
+            "cycle": 1,
+            "duplicate_event_count": 0,
+            "issues": [],
+            "orphan_open_positions": 0,
+            "reconciliation_ok": true,
+            "restore_ok": true,
+            "status": "caution",
+            "validation_ok": true
+          },
+          {
+            "alerts_by_severity": {
+              "critical": 0,
+              "error": 0,
+              "info": 0,
+              "warning": 42
+            },
+            "cycle": 2,
+            "duplicate_event_count": 0,
+            "issues": [],
+            "orphan_open_positions": 0,
+            "reconciliation_ok": true,
+            "restore_ok": true,
+            "status": "caution",
+            "validation_ok": true
+          },
+          {
+            "alerts_by_severity": {
+              "critical": 0,
+              "error": 0,
+              "info": 0,
+              "warning": 42
+            },
+            "cycle": 3,
+            "duplicate_event_count": 0,
+            "issues": [],
+            "orphan_open_positions": 0,
+            "reconciliation_ok": true,
+            "restore_ok": true,
+            "status": "caution",
+            "validation_ok": true
+          },
+          {
+            "alerts_by_severity": {
+              "critical": 0,
+              "error": 0,
+              "info": 0,
+              "warning": 42
+            },
+            "cycle": 4,
+            "duplicate_event_count": 0,
+            "issues": [],
+            "orphan_open_positions": 0,
+            "reconciliation_ok": true,
+            "restore_ok": true,
+            "status": "caution",
+            "validation_ok": true
+          },
+          {
+            "alerts_by_severity": {
+              "critical": 0,
+              "error": 0,
+              "info": 0,
+              "warning": 42
+            },
+            "cycle": 5,
+            "duplicate_event_count": 0,
+            "issues": [],
+            "orphan_open_positions": 0,
+            "reconciliation_ok": true,
+            "restore_ok": true,
+            "status": "caution",
+            "validation_ok": true
+          }
+        ],
+        "cycle_metrics": [
+          {
+            "blocked_trades": 140,
+            "cycles_completed": 5,
+            "decision": "caution",
+            "execution_events": 140,
+            "expectancy_usd": 3.879999999999424,
+            "gross_loss_usd": 0,
+            "gross_profit_usd": 58.199999999991356,
+            "net_pnl_usd": 58.199999999991356,
+            "profit_factor": 999.0,
+            "run_dir": "/home/silver/projects/IRIS-Bot/runs/20260401T194656Z_paper_soak",
+            "session_breakdown": {
+              "unknown": 15
+            },
+            "threshold_max": 0.45,
+            "threshold_min": 0.45,
+            "threshold_spread": 0.0,
+            "trade_conversion_ratio": 0.0,
+            "trades": 15
+          }
+        ],
+        "cycles_completed": 5,
+        "decision": "go",
+        "expectancy_degradation_pct": 0.0,
+        "no_trade_count": 140,
+        "profit_factor_degradation_pct": 0.0,
+        "reasons": [],
+        "source_of_truth": "health_report.cycles",
+        "symbol": "EURUSD"
+      }
+    }
+  },
+  "schema_version": 1
+}

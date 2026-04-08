@@ -38,18 +38,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import platform
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from iris_bot.config import Settings
+from iris_bot.durable_io import durable_copy_file, durable_write_json
+from iris_bot.registry_lock import file_exclusive_lock
 
 
 _MANIFEST_FILENAME = "evidence_store_manifest.json"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_EVIDENCE_STORE_POLICY_VERSION = 1
+_CHECKSUM_ALGORITHM = "sha256"
+_CONFLICT_POLICY = "entry_id_checksum_strict_v1"
+_RETENTION_POLICY = "tombstone_expiry_v1"
 
 # Artifact types this store manages (others are rejected)
 MANAGED_ARTIFACT_TYPES = frozenset({"lifecycle_reconciliation", "symbol_stability"})
@@ -61,6 +65,14 @@ class ExternalPathError(Exception):
 
 class UnknownArtifactTypeError(Exception):
     """Raised when an artifact type is not managed by the evidence store."""
+
+
+class EvidenceManifestError(Exception):
+    """Raised when the evidence store manifest is malformed or unreadable."""
+
+
+class EvidenceConflictError(Exception):
+    """Raised when a logical evidence entry is re-ingested with incompatible content."""
 
 
 def evidence_store_dir(settings: Settings) -> Path:
@@ -77,26 +89,58 @@ def _coerce_json_dict(raw: object) -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
-def _load_manifest(settings: Settings) -> dict[str, Any]:
+def _default_manifest() -> dict[str, Any]:
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "evidence_store_policy_version": _EVIDENCE_STORE_POLICY_VERSION,
+        "conflict_policy": _CONFLICT_POLICY,
+        "retention_policy": _RETENTION_POLICY,
+        "updated_at": "",
+        "entries": [],
+        "tombstones": [],
+    }
+
+
+def _normalize_manifest(raw: dict[str, Any]) -> dict[str, Any]:
+    entries_raw = raw.get("entries")
+    if not isinstance(entries_raw, list):
+        raise EvidenceManifestError("Evidence store manifest entries must be a list.")
+    tombstones_raw = raw.get("tombstones", [])
+    if not isinstance(tombstones_raw, list):
+        raise EvidenceManifestError("Evidence store manifest tombstones must be a list.")
+    normalized = _default_manifest()
+    normalized["schema_version"] = int(raw.get("schema_version", _SCHEMA_VERSION))
+    normalized["evidence_store_policy_version"] = int(
+        raw.get("evidence_store_policy_version", _EVIDENCE_STORE_POLICY_VERSION)
+    )
+    normalized["conflict_policy"] = str(raw.get("conflict_policy", _CONFLICT_POLICY))
+    normalized["retention_policy"] = str(raw.get("retention_policy", _RETENTION_POLICY))
+    normalized["updated_at"] = str(raw.get("updated_at", ""))
+    normalized["entries"] = [_coerce_json_dict(entry) for entry in entries_raw]
+    normalized["tombstones"] = [_coerce_json_dict(entry) for entry in tombstones_raw]
+    return normalized
+
+
+def _load_manifest(settings: Settings, *, require_valid: bool = False) -> dict[str, Any]:
     path = _manifest_path(settings)
     if not path.exists():
-        return {"schema_version": _SCHEMA_VERSION, "entries": []}
+        return _default_manifest()
     try:
         raw = _coerce_json_dict(json.loads(path.read_text(encoding="utf-8")))
-        if not isinstance(raw.get("entries"), list):
-            return {"schema_version": _SCHEMA_VERSION, "entries": []}
-        return raw
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {"schema_version": _SCHEMA_VERSION, "entries": []}
+        return _normalize_manifest(raw)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        if require_valid:
+            raise EvidenceManifestError(
+                f"Evidence store manifest is malformed or unreadable: {path}"
+            ) from exc
+        return _default_manifest()
 
 
 def _save_manifest(settings: Settings, manifest: dict[str, Any]) -> None:
     store_dir = evidence_store_dir(settings)
     store_dir.mkdir(parents=True, exist_ok=True)
     path = _manifest_path(settings)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    durable_write_json(path, manifest)
 
 
 def _is_external_path(settings: Settings, path: Path) -> bool:
@@ -112,9 +156,75 @@ def _checksum_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _logical_key(artifact_type: str, symbol: str | None) -> str:
+    return f"{artifact_type}::{symbol or 'global'}"
+
+
 def _entry_id(artifact_type: str, symbol: str | None, source_run_id: str) -> str:
     tag = symbol or "global"
     return f"{artifact_type}__{tag}__{source_run_id}"
+
+
+def _entry_by_id(entries: list[dict[str, Any]], entry_id: str) -> dict[str, Any] | None:
+    for entry in entries:
+        if entry.get("entry_id") == entry_id:
+            return entry
+    return None
+
+
+def _expire_manifest_entries(
+    manifest: dict[str, Any],
+    max_age_days: float,
+    reference_time: datetime,
+) -> tuple[dict[str, Any], list[str], list[Path]]:
+    if max_age_days <= 0:
+        raise ValueError("max_age_days must be positive")
+
+    kept: list[dict[str, Any]] = []
+    expired_ids: list[str] = []
+    expired_paths: list[Path] = []
+    tombstones = cast(list[dict[str, Any]], manifest["tombstones"])
+
+    for entry in cast(list[dict[str, Any]], manifest["entries"]):
+        created_raw = entry.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(str(created_raw))
+            if ts.tzinfo is None:
+                from datetime import timezone
+
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_days = (reference_time - ts).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            age_days = 0.0
+
+        if age_days > max_age_days:
+            expired_ids.append(str(entry.get("entry_id", "")))
+            expired_path = Path(str(entry.get("canonical_abs_path", "")))
+            if expired_path:
+                expired_paths.append(expired_path)
+            tombstones.append(
+                {
+                    "entry_id": entry.get("entry_id"),
+                    "logical_key": entry.get(
+                        "logical_key",
+                        _logical_key(str(entry.get("artifact_type", "")), cast(str | None, entry.get("symbol"))),
+                    ),
+                    "artifact_type": entry.get("artifact_type"),
+                    "symbol": entry.get("symbol"),
+                    "checksum": entry.get("checksum"),
+                    "checksum_algorithm": entry.get("checksum_algorithm", _CHECKSUM_ALGORITHM),
+                    "source_run_id": entry.get("source_run_id"),
+                    "canonical_path": entry.get("canonical_path"),
+                    "expired_at": reference_time.isoformat(),
+                    "expiration_reason": f"created_at_older_than_{max_age_days}_days",
+                    "tombstone_policy": _RETENTION_POLICY,
+                }
+            )
+        else:
+            kept.append(entry)
+
+    manifest["entries"] = kept
+    return manifest, expired_ids, expired_paths
 
 
 def ingest_evidence(
@@ -154,55 +264,90 @@ def ingest_evidence(
             "External Windows workspace paths (/mnt/c/...) are not accepted as canonical evidence."
         )
 
-    # Auto-expire stale entries before ingesting, if configured.
-    max_age = settings.operational.evidence_max_age_days
-    if max_age is not None:
-        expire_evidence(settings, max_age)
-
     store_dir = evidence_store_dir(settings)
     store_dir.mkdir(parents=True, exist_ok=True)
 
     entry_id = _entry_id(artifact_type, symbol, source_run_id)
-    # Use a stable filename based on entry_id
-    dest_filename = f"{entry_id}.json"
-    dest_path = store_dir / dest_filename
+    logical_key = _logical_key(artifact_type, symbol)
+    max_age = settings.operational.evidence_max_age_days
+    source_checksum = _checksum_file(source_path)
+    now = datetime.now(tz=UTC)
+    expired_paths: list[Path] = []
+    manifest_path = _manifest_path(settings)
 
-    # Copy atomically
-    tmp_dest = dest_path.with_suffix(".json.tmp")
-    shutil.copy2(str(source_path), str(tmp_dest))
-    os.replace(tmp_dest, dest_path)
-
-    checksum = _checksum_file(dest_path)
-
-    # Parse created_at from artifact envelope if available
-    created_at = datetime.now(tz=UTC).isoformat()
+    created_at = now.isoformat()
     try:
-        raw = json.loads(dest_path.read_text(encoding="utf-8"))
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
         if "generated_at" in raw:
             created_at = str(raw["generated_at"])
     except (OSError, json.JSONDecodeError, KeyError):
         pass
 
-    entry: dict[str, Any] = {
-        "entry_id": entry_id,
-        "artifact_type": artifact_type,
-        "symbol": symbol,
-        "checksum": checksum,
-        "created_at": created_at,
-        "ingested_at": datetime.now(tz=UTC).isoformat(),
-        "source_run_id": source_run_id,
-        "source_host": source_host or platform.node() or "unknown",
-        "provenance": provenance,
-        "canonical_path": str(dest_path.relative_to(settings.project_root)),
-        "canonical_abs_path": str(dest_path),
-    }
+    with file_exclusive_lock(manifest_path):
+        manifest = _load_manifest(settings, require_valid=True)
+        manifest_changed = False
 
-    # Update manifest atomically: replace existing entry or append
-    manifest = _load_manifest(settings)
-    entries = [e for e in manifest["entries"] if e.get("entry_id") != entry_id]
-    entries.append(entry)
-    manifest["entries"] = entries
-    _save_manifest(settings, manifest)
+        if max_age is not None:
+            manifest, _, expired_paths = _expire_manifest_entries(manifest, max_age, now)
+            manifest_changed = bool(expired_paths)
+
+        entries = cast(list[dict[str, Any]], manifest["entries"])
+        existing = _entry_by_id(entries, entry_id)
+        if existing is not None:
+            existing_checksum = str(existing.get("checksum", ""))
+            if existing_checksum != source_checksum:
+                raise EvidenceConflictError(
+                    f"Conflicting evidence for entry_id {entry_id!r}: "
+                    f"existing checksum {existing_checksum[:16]!r}, "
+                    f"new checksum {source_checksum[:16]!r}. "
+                    "Entry IDs are immutable; use a new source_run_id for distinct evidence."
+                )
+            dest_path = Path(str(existing.get("canonical_abs_path", "")))
+            if not dest_path.exists() or _checksum_file(dest_path) != source_checksum:
+                durable_copy_file(source_path, dest_path)
+            if manifest_changed:
+                manifest["updated_at"] = now.isoformat()
+                _save_manifest(settings, manifest)
+            for expired_path in expired_paths:
+                if expired_path.exists():
+                    try:
+                        expired_path.unlink()
+                    except OSError:
+                        pass
+            return existing
+
+        dest_filename = f"{entry_id}.json"
+        dest_path = store_dir / dest_filename
+        durable_copy_file(source_path, dest_path)
+        checksum = _checksum_file(dest_path)
+
+        entry: dict[str, Any] = {
+            "entry_id": entry_id,
+            "artifact_type": artifact_type,
+            "symbol": symbol,
+            "logical_key": logical_key,
+            "checksum": checksum,
+            "checksum_algorithm": _CHECKSUM_ALGORITHM,
+            "created_at": created_at,
+            "ingested_at": now.isoformat(),
+            "source_run_id": source_run_id,
+            "source_host": source_host or platform.node() or "unknown",
+            "provenance": provenance,
+            "canonical_path": str(dest_path.relative_to(settings.project_root)),
+            "canonical_abs_path": str(dest_path),
+            "entry_state": "active",
+            "canonical_decision": "accepted_as_canonical_entry",
+        }
+        entries.append(entry)
+        manifest["updated_at"] = now.isoformat()
+        _save_manifest(settings, manifest)
+
+    for expired_path in expired_paths:
+        if expired_path.exists():
+            try:
+                expired_path.unlink()
+            except OSError:
+                pass
 
     return entry
 
@@ -271,40 +416,24 @@ def expire_evidence(
     Age is measured from ``created_at`` (original artifact timestamp).
     Returns the list of entry_ids that were expired.
     """
-    if max_age_days <= 0:
-        raise ValueError("max_age_days must be positive")
-
     now = reference_time or datetime.now(tz=UTC)
-    manifest = _load_manifest(settings)
-    kept: list[dict[str, Any]] = []
+    manifest_path = _manifest_path(settings)
     expired_ids: list[str] = []
+    expired_paths: list[Path] = []
 
-    for entry in manifest["entries"]:
-        created_raw = entry.get("created_at", "")
-        try:
-            ts = datetime.fromisoformat(created_raw)
-            if ts.tzinfo is None:
-                from datetime import timezone
-                ts = ts.replace(tzinfo=timezone.utc)
-            age_days = (now - ts).total_seconds() / 86400.0
-        except (ValueError, TypeError):
-            age_days = 0.0  # unparseable timestamp → keep entry
+    with file_exclusive_lock(manifest_path):
+        manifest = _load_manifest(settings, require_valid=True)
+        manifest, expired_ids, expired_paths = _expire_manifest_entries(manifest, max_age_days, now)
+        if expired_ids:
+            manifest["updated_at"] = now.isoformat()
+            _save_manifest(settings, manifest)
 
-        if age_days > max_age_days:
-            expired_ids.append(entry.get("entry_id", ""))
-            # Remove physical file if it still exists
-            abs_path = Path(entry.get("canonical_abs_path", ""))
-            if abs_path.exists():
-                try:
-                    abs_path.unlink()
-                except OSError:
-                    pass
-        else:
-            kept.append(entry)
-
-    if expired_ids:
-        manifest["entries"] = kept
-        _save_manifest(settings, manifest)
+    for expired_path in expired_paths:
+        if expired_path.exists():
+            try:
+                expired_path.unlink()
+            except OSError:
+                pass
 
     return expired_ids
 
@@ -324,7 +453,7 @@ def detect_contradictions(settings: Settings) -> list[dict[str, Any]]:
     manifest = _load_manifest(settings)
     by_key: dict[str, list[dict[str, Any]]] = {}
     for entry in manifest["entries"]:
-        key = f"{entry.get('artifact_type', '')}::{entry.get('symbol') or 'global'}"
+        key = str(entry.get("logical_key", _logical_key(str(entry.get("artifact_type", "")), entry.get("symbol"))))
         by_key.setdefault(key, []).append(entry)
 
     contradictions: list[dict[str, Any]] = []
@@ -384,7 +513,12 @@ def evidence_store_status(settings: Settings) -> dict[str, Any]:
       - Integrity check for all entries (checksum verification)
       - Whether any external paths were rejected (checked via manifest provenance)
     """
-    manifest = _load_manifest(settings)
+    manifest_error: str | None = None
+    try:
+        manifest = _load_manifest(settings, require_valid=True)
+    except EvidenceManifestError as exc:
+        manifest = _default_manifest()
+        manifest_error = str(exc)
     entries = manifest["entries"]
 
     by_type: dict[str, int] = {}
@@ -414,10 +548,21 @@ def evidence_store_status(settings: Settings) -> dict[str, Any]:
     return {
         "store_dir": str(evidence_store_dir(settings)),
         "manifest_path": str(_manifest_path(settings)),
+        "schema_version": manifest.get("schema_version", _SCHEMA_VERSION),
+        "evidence_store_policy_version": manifest.get(
+            "evidence_store_policy_version",
+            _EVIDENCE_STORE_POLICY_VERSION,
+        ),
+        "conflict_policy": manifest.get("conflict_policy", _CONFLICT_POLICY),
+        "retention_policy": manifest.get("retention_policy", _RETENTION_POLICY),
+        "manifest_valid": manifest_error is None,
+        "manifest_error": manifest_error,
         "total_entries": len(entries),
+        "tombstone_count": len(cast(list[dict[str, Any]], manifest.get("tombstones", []))),
         "by_artifact_type": by_type,
         "integrity_failures": integrity_failures,
         "integrity_ok": len(integrity_failures) == 0,
+        "contradiction_count": len(detect_contradictions(settings)),
         "latest_per_key": {
             key: {
                 "entry_id": e.get("entry_id"),
@@ -425,6 +570,9 @@ def evidence_store_status(settings: Settings) -> dict[str, Any]:
                 "source_run_id": e.get("source_run_id"),
                 "source_host": e.get("source_host"),
                 "provenance": e.get("provenance"),
+                "logical_key": e.get("logical_key"),
+                "checksum": e.get("checksum"),
+                "entry_state": e.get("entry_state"),
             }
             for key, e in sorted(latest_per_key.items())
         },

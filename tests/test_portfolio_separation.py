@@ -20,6 +20,7 @@ from pathlib import Path
 from iris_bot.artifacts import wrap_artifact
 from iris_bot.config import load_settings
 from iris_bot.governance import (
+    active_strategy_profiles_path,
     promote_strategy_profile,
     validate_strategy_profiles,
 )
@@ -167,6 +168,8 @@ def test_usdjpy_in_deliberately_blocked(tmp_path, monkeypatch):
     sep = build_portfolio_separation(settings, registry)
     assert "USDJPY" in sep.deliberately_blocked
     assert sep.deliberately_blocked["USDJPY"] == _PERMANENTLY_EXCLUDED["USDJPY"]
+    assert sep.deliberately_blocked_details["USDJPY"]["rule_id"] == "symbol_out_of_scope_for_promotion"
+    assert sep.policy_version == "governance_policy.v1"
 
 
 def test_usdjpy_never_in_active_portfolio(tmp_path, monkeypatch):
@@ -181,6 +184,14 @@ def test_usdjpy_never_in_active_portfolio(tmp_path, monkeypatch):
     sep = build_portfolio_separation(settings, registry)
     assert "USDJPY" not in sep.active_portfolio
     assert "USDJPY" not in sep.approved_demo_universe
+
+
+def test_active_universe_status_includes_policy_context(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch)
+    registry = {"profiles": {}, "active_profiles": {}}
+    report = active_universe_status_report(settings, registry)
+    assert report["policy_context"]["policy_version"] == "governance_policy.v1"
+    assert report["per_symbol"]["USDJPY"]["policy_rule"]["rule_id"] == "symbol_out_of_scope_for_promotion"
 
 
 def test_approved_demo_universe_subset_of_eligible(tmp_path, monkeypatch):
@@ -246,6 +257,15 @@ def test_active_universe_status_report_covers_full_universe(tmp_path, monkeypatc
     report = active_universe_status_report(settings, registry)
     for s in settings.trading.symbols:
         assert s in report["per_symbol"]
+
+
+def test_active_strategy_materialization_includes_provenance(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, monkeypatch, symbols=("EURUSD", "USDJPY"))
+    _make_approved_demo(settings, "EURUSD")
+    raw = json.loads(active_strategy_profiles_path(settings).read_text(encoding="utf-8"))
+    assert raw["artifact_type"] == "active_strategy_profiles"
+    assert raw["provenance"]["correlation_keys"]["artifact_role"] == "active_profile_materialization"
+    assert raw["provenance"]["references"]["registry_path"].endswith("strategy_profile_registry.json")
 
 
 def test_active_universe_status_deliberately_blocked_category(tmp_path, monkeypatch):

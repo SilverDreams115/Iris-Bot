@@ -205,5 +205,9 @@ def test_journals_and_reports_are_written(tmp_path) -> None:
     assert (tmp_path / "closed_trades.csv").exists()
     assert (tmp_path / "daily_summary.json").exists()
     assert (tmp_path / "run_report.json").exists()
+    assert (tmp_path / "equity_curve.csv").exists()
     validation = json.loads((tmp_path / "validation_report.json").read_text(encoding="utf-8"))
+    run_report = json.loads((tmp_path / "run_report.json").read_text(encoding="utf-8"))
     assert validation["state_checks"]["dynamic_stop_policy_implemented"] is False
+    assert validation["consistency"]["checks_passed"] > 0
+    assert run_report["equity_point_count"] == len(rows)

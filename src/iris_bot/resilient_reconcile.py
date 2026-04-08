@@ -276,6 +276,7 @@ def build_live_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
     """
     def validator(intent: OrderIntent) -> ExecutionDecision:
         if not client.ensure_connection():
+            health = client.session_health()
             return ExecutionDecision(
                 accepted=False,
                 reason="communication_error",
@@ -283,7 +284,7 @@ def build_live_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
                     "broker_result": {
                         "accepted": False,
                         "reason": "not_connected",
-                        "health": client.session_health().to_dict() if client.session_health() is not None else None,
+                        "health": health.to_dict() if health is not None else None,
                     },
                     "broker_decision": asdict(BrokerEventDecision("communication_error", "retry", True, False, {})),
                 },
@@ -310,6 +311,7 @@ def build_live_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
 def build_demo_execution_validator(client: MT5Client) -> Callable[[OrderIntent], ExecutionDecision]:
     def validator(intent: OrderIntent) -> ExecutionDecision:
         if not client.ensure_connection():
+            health = client.session_health()
             return ExecutionDecision(
                 accepted=False,
                 reason="communication_error",
@@ -317,7 +319,7 @@ def build_demo_execution_validator(client: MT5Client) -> Callable[[OrderIntent],
                     "broker_result": {
                         "accepted": False,
                         "reason": "not_connected",
-                        "health": client.session_health().to_dict() if client.session_health() is not None else None,
+                        "health": health.to_dict() if health is not None else None,
                     },
                     "broker_decision": asdict(BrokerEventDecision("communication_error", "retry", True, False, {})),
                 },

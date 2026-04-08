@@ -1,0 +1,47 @@
+{
+  "artifact_type": "lifecycle_reconciliation",
+  "checksum": "a31f352b4a92cf617fa3d17cb753a423c708976ce04519e70fbb5b71ffd20169",
+  "compatibility": {},
+  "generated_at": "2026-04-05T23:59:10.911809+00:00",
+  "payload": {
+    "critical_mismatch_count": 0,
+    "mismatch_counts": {},
+    "mismatches": [],
+    "ok": true,
+    "restore_state_report": {
+      "action": "soft_resync",
+      "issues": [],
+      "ok": true,
+      "restored": true,
+      "state_path": "\\\\wsl.localhost\\Ubuntu\\home\\silver\\projects\\IRIS-Bot\\data\\runtime\\runtime_state.json"
+    },
+    "scope_report": {
+      "comment_tag": "IRIS-Bot",
+      "ignored_deals": 0,
+      "ignored_orders": 0,
+      "ignored_positions": 0,
+      "magic_number": 20260401,
+      "ownership_filter_active": true,
+      "reconcile_symbols_only": true
+    },
+    "symbols": {
+      "AUDUSD": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      },
+      "EURUSD": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      },
+      "GBPUSD": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      },
+      "USDJPY": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      }
+    }
+  },
+  "schema_version": 1
+}

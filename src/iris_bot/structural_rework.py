@@ -35,6 +35,24 @@ _MIN_VALIDATION_ROWS = 10
 _MIN_TEST_ROWS = 5
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
+
+
 def _latest_experiment_matrix_run(settings: Settings) -> Path | None:
     candidates = sorted(settings.data.runs_dir.glob("*_experiment_matrix"))
     return candidates[-1] if candidates else None
@@ -54,7 +72,10 @@ def _load_or_build_experiment_matrix(settings: Settings) -> Path:
 
 def _load_matrix_result(run_dir: Path, experiment_id: str) -> dict[str, Any]:
     path = run_dir / experiment_id / "experiment_result.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"experiment_result invalid in {path}")
+    return payload
 
 
 def _selected_structural_result(run_dir: Path) -> dict[str, Any]:

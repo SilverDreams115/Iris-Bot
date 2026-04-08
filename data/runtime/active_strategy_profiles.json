@@ -1,13 +1,14 @@
 {
   "artifact_type": "active_strategy_profiles",
-  "checksum": "67c13f8e7ae40d0b4d12dfccb32cd6d33f40bcee7afacd21eb1135f52f99cb50",
+  "artifact_version": "active_strategy_profiles.v1",
+  "checksum": "12e7847134e20d1bd195cf54e761d9f6417194accea9e8491c2833708d5e293e",
   "compatibility": {
     "consumer": "paper_engine",
     "loader": "active_strategy_profiles"
   },
-  "generated_at": "2026-04-05T23:58:54.544319+00:00",
+  "generated_at": "2026-04-06T20:09:32.692593+00:00",
   "payload": {
-    "materialized_at": "2026-04-05T23:58:54.544314+00:00",
+    "materialized_at": "2026-04-06T20:09:32.692566+00:00",
     "note": "Only approved_demo profiles. Use strategy_profiles.json for full historical sync.",
     "symbol_count": 3,
     "symbols": {
@@ -117,6 +118,26 @@
         "threshold": 0.45
       }
     }
+  },
+  "provenance": {
+    "contract_hashes": {},
+    "correlation_keys": {
+      "artifact_role": "active_profile_materialization"
+    },
+    "evaluation_contract_version": null,
+    "ingested_at": null,
+    "integrity": {},
+    "lineage_id": "20260401T193139Z_strategy_validation",
+    "materialized_at": "2026-04-06T20:09:32.692589+00:00",
+    "parent_run_id": "",
+    "policy_source": null,
+    "policy_version": null,
+    "references": {
+      "registry_path": "/home/silver/projects/IRIS-Bot/data/runtime/strategy_profile_registry.json"
+    },
+    "run_id": "",
+    "source_run_id": "20260401T193139Z_strategy_validation",
+    "training_contract_version": null
   },
   "schema_version": 1
 }

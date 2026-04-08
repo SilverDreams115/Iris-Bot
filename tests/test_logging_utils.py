@@ -1,5 +1,4 @@
 import json
-import logging
 
 from iris_bot.logging_utils import configure_logging
 

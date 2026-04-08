@@ -75,6 +75,14 @@ def test_experiment_with_xgboost_creates_processed_dataset_and_artifacts(tmp_pat
     payload = json.loads(report_files[0].read_text(encoding="utf-8"))
     assert "xgboost" in payload
     assert "baseline" in payload
+    assert payload["training_contract_version"] == "1.0"
+    assert payload["evaluation_contract_version"] == "1.0"
+    assert payload["artifact_provenance"]["run_id"].endswith("_experiment")
+    assert payload["artifact_provenance"]["correlation_keys"]["command"] == "experiment"
+    assert payload["artifact_provenance"]["contract_hashes"]["bundle"] == payload["contract_hashes"]["bundle"]
+    assert payload["training_contract"]["economic_sample_weighting"]["enabled"] is True
+    assert payload["evaluation_contract"]["threshold_application"]["policy"] == "global_threshold_only"
+    assert "bundle" in payload["contract_hashes"]
     assert payload["xgboost"]["class_weighting"]["enabled"] is True
     assert "weights" in payload["xgboost"]["class_weighting"]
     assert payload["xgboost"]["probability_calibration"]["enabled"] is True

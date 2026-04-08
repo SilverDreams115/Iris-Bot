@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from iris_bot.artifacts import artifact_schema_report, wrap_artifact
+from iris_bot.artifacts import build_artifact_provenance
 from iris_bot.config import Settings
 from iris_bot.evidence_store import evidence_store_status
+from iris_bot.evidence_store import ingest_evidence
 from iris_bot.governance_active import (
     resolve_active_profile_entry,
     resolve_active_profiles,
+)
+from iris_bot.governance_policy import (
+    deliberately_blocked_symbols,
+    load_governance_policy,
+    symbol_governance_rule,
 )
 from iris_bot.governance_promotion import (
     promote_strategy_profile as _promote_strategy_profile,
@@ -16,6 +24,7 @@ from iris_bot.governance_promotion import (
 )
 from iris_bot.governance_validation import validate_strategy_profiles
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
+from iris_bot.portfolio import build_portfolio_separation
 from iris_bot.profile_evidence import (
     _compute_endurance_gate_metrics,
     _latest_endurance_evidence,
@@ -47,9 +56,9 @@ from iris_bot.symbols import load_symbol_strategy_profiles, strategy_profiles_pa
 
 __all__ = [
     # Governance pipeline functions defined here
-    "run_promotion_review",
-    "run_governance_audit",
-    "run_governance_rollback",
+    "review_approved_demo_readiness",
+    "promote_strategy_profile",
+    "rollback_strategy_profile",
     "resolve_active_profiles",
     "resolve_active_profile_entry",
     # Re-exported registry helpers used by tests and callers
@@ -59,6 +68,7 @@ __all__ = [
     "save_strategy_profile_registry",
     "validate_strategy_profiles",
     "repair_strategy_profile_registry",
+    "ingest_governance_evidence",
     # Re-exported internal helpers for test access
     "_find_entry",
 ]
@@ -129,6 +139,7 @@ def _build_promotion_gate_matrix(
 
 def _apply_gate_decisions(
     symbol: str,
+    settings: Settings,
     gate_matrix: dict[str, bool],
     gate_cfg: Any,
     lifecycle_age_hours: float | None,
@@ -155,8 +166,9 @@ def _apply_gate_decisions(
             severity = "warning"
         reasons.append(reason)
 
-    if symbol == "USDJPY":
-        block("symbol_out_of_scope_for_promotion")
+    symbol_rule = symbol_governance_rule(settings, symbol)
+    if symbol_rule is not None and not symbol_rule.promotion_allowed:
+        block(symbol_rule.rule_id)
 
     if not gate_matrix["validated_profile_present"]:
         block("validated_profile_missing")
@@ -259,8 +271,9 @@ def _promotion_review_for_symbol(
         endurance, endurance_symbol, alerts, endo_metrics, gate_cfg,
     )
     final_decision, severity, reasons = _apply_gate_decisions(
-        symbol, gate_matrix, gate_cfg, lifecycle_age_hours, endurance_symbol, endo_metrics, strict=strict,
+        symbol, settings, gate_matrix, gate_cfg, lifecycle_age_hours, endurance_symbol, endo_metrics, strict=strict,
     )
+    symbol_rule = symbol_governance_rule(settings, symbol)
     active_status = resolve_active_profile_entry(settings, symbol, registry=registry)
     return {
         "symbol": symbol,
@@ -290,6 +303,20 @@ def _promotion_review_for_symbol(
         "final_decision": final_decision,
         "severity": severity,
         "reasons": sorted(set(reasons)),
+        "policy_context": (
+            symbol_rule.to_dict()
+            if symbol_rule is not None
+            else {
+                "symbol": symbol,
+                "rule_id": "default_allow",
+                "decision_reason": "no_symbol_specific_governance_policy",
+                "promotion_review": "allow",
+                "activation_readiness": "active",
+                "portfolio_eligibility": "eligible",
+                "policy_version": str(load_governance_policy(settings)["policy_version"]),
+                "policy_source": str(load_governance_policy(settings)["policy_source"]),
+            }
+        ),
         "endurance_summary": {
             "available": endurance is not None,
             "decision": endurance_symbol.get("decision", "missing") if endurance is not None else "missing",
@@ -324,7 +351,8 @@ def _promotion_review_symbols(settings: Settings, registry: dict[str, Any]) -> t
     symbols: list[str] = []
     for symbol in settings.trading.symbols:
         latest = _latest_entry_by_state(registry, symbol, {"validated"})
-        if latest is not None and symbol != "USDJPY":
+        symbol_rule = symbol_governance_rule(settings, symbol)
+        if latest is not None and (symbol_rule is None or symbol_rule.promotion_allowed):
             symbols.append(symbol)
     return tuple(symbols)
 
@@ -338,6 +366,14 @@ def review_approved_demo_readiness(settings: Settings) -> int:
         logger.error("No validated symbols eligible for promotion review")
         return 2
     reviews = {symbol: _promotion_review_for_symbol(settings, symbol, registry, strict=False) for symbol in symbols}
+    governance_policy = load_governance_policy(settings)
+    provenance = build_artifact_provenance(
+        run_dir=run_dir,
+        policy_version=str(governance_policy["policy_version"]),
+        policy_source=str(governance_policy["policy_source"]),
+        correlation_keys={"command": "review_approved_demo_readiness"},
+        references={"registry_path": str(registry_path(settings))},
+    )
     summary = {
         "symbols": {symbol: review["final_decision"] for symbol, review in reviews.items()},
         "approved_demo_ready": sorted(symbol for symbol, review in reviews.items() if review["final_decision"] == "APPROVED_DEMO"),
@@ -346,14 +382,14 @@ def review_approved_demo_readiness(settings: Settings) -> int:
         "revert_to_blocked": sorted(symbol for symbol, review in reviews.items() if review["final_decision"] == "REVERT_TO_BLOCKED"),
     }
     gate_matrix = {symbol: review["gate_matrix"] for symbol, review in reviews.items()}
-    write_json_report(run_dir, "symbol_promotion_review_report.json", wrap_artifact("strategy_profile_promotion", {"symbols": reviews}))
-    write_json_report(run_dir, "approved_demo_readiness_report.json", wrap_artifact("strategy_profile_promotion", {"symbols": reviews}))
-    write_json_report(run_dir, "promotion_gate_matrix.json", wrap_artifact("strategy_profile_promotion", {"symbols": gate_matrix}))
-    write_json_report(run_dir, "promotion_decision_summary.json", wrap_artifact("strategy_profile_promotion", summary))
+    write_json_report(run_dir, "symbol_promotion_review_report.json", wrap_artifact("strategy_profile_promotion", {"symbols": reviews}, provenance=provenance))
+    write_json_report(run_dir, "approved_demo_readiness_report.json", wrap_artifact("strategy_profile_promotion", {"symbols": reviews}, provenance=provenance))
+    write_json_report(run_dir, "promotion_gate_matrix.json", wrap_artifact("strategy_profile_promotion", {"symbols": gate_matrix}, provenance=provenance))
+    write_json_report(run_dir, "promotion_decision_summary.json", wrap_artifact("strategy_profile_promotion", summary, provenance=provenance))
     write_json_report(
         run_dir,
         "active_profile_resolution_report.json",
-        wrap_artifact("active_strategy_status", resolve_active_profiles(settings)[1]),
+        wrap_artifact("active_strategy_status", resolve_active_profiles(settings)[1], provenance=provenance),
     )
     logger.info(
         "review_approved_demo_readiness symbols=%s approved=%s run_dir=%s",
@@ -398,6 +434,7 @@ def diagnose_profile_activation(settings: Settings) -> int:
     _, active_payload = resolve_active_profiles(settings)
     strategy_schema = artifact_schema_report(strategy_profiles_path(settings), expected_type="strategy_profiles")
     registry_path_report = artifact_schema_report(registry_path(settings), expected_type="strategy_profile_registry")
+    governance_policy = load_governance_policy(settings)
     consistency_symbols: dict[str, Any] = {}
     readiness_symbols: dict[str, Any] = {}
     for symbol in settings.trading.symbols:
@@ -420,14 +457,29 @@ def diagnose_profile_activation(settings: Settings) -> int:
         latest_endurance = _latest_endurance_payload(settings)
         lifecycle_symbol = (latest_lifecycle or {}).get("symbols", {}).get(symbol, {})
         endurance_symbol = (latest_endurance or {}).get("symbols", {}).get(symbol, {})
-        if symbol == "USDJPY":
-            readiness = "blocked_out_of_scope"
+        symbol_rule = symbol_governance_rule(settings, symbol)
+        if symbol_rule is not None and symbol_rule.activation_readiness != "active":
+            readiness = symbol_rule.activation_readiness
         elif active_status["ok"]:
             readiness = "active"
         else:
             readiness = "blocked"
         readiness_symbols[symbol] = {
             "readiness": readiness,
+            "policy_context": (
+                symbol_rule.to_dict()
+                if symbol_rule is not None
+                else {
+                    "symbol": symbol,
+                    "rule_id": "default_allow",
+                    "decision_reason": "no_symbol_specific_governance_policy",
+                    "promotion_review": "allow",
+                    "activation_readiness": "active",
+                    "portfolio_eligibility": "eligible",
+                    "policy_version": str(governance_policy["policy_version"]),
+                    "policy_source": str(governance_policy["policy_source"]),
+                }
+            ),
             "active_profile_reasons": active_status["reasons"],
             "latest_endurance_decision": endurance_symbol.get("decision", "missing"),
             "latest_lifecycle_critical_mismatch_count": lifecycle_symbol.get("critical_mismatch_count", None),
@@ -458,7 +510,7 @@ def diagnose_profile_activation(settings: Settings) -> int:
             {
                 "avoided_shortcuts": [
                     "no active_profile_id injection by hand",
-                    "no symbol-specific bypass for blocked symbols",
+                    "no symbol-specific bypass for blocked symbols outside governance policy",
                     "no parallel activation path outside governance registry",
                     "no threshold relaxation to force tradability",
                 ],
@@ -640,7 +692,19 @@ def evidence_store_status_command(settings: Settings) -> int:
     run_dir = build_run_directory(settings.data.runs_dir, "evidence_store_status")
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
     status = evidence_store_status(settings)
-    write_json_report(run_dir, "evidence_store_manifest.json", wrap_artifact("evidence_store_manifest", status))
+    write_json_report(
+        run_dir,
+        "evidence_store_manifest.json",
+        wrap_artifact(
+            "evidence_store_manifest",
+            status,
+            provenance=build_artifact_provenance(
+                run_dir=run_dir,
+                correlation_keys={"command": "evidence_store_status"},
+                references={"manifest_path": status["manifest_path"]},
+            ),
+        ),
+    )
     logger.info(
         "evidence_store_status total=%s integrity_ok=%s run_dir=%s",
         status["total_entries"],
@@ -648,6 +712,110 @@ def evidence_store_status_command(settings: Settings) -> int:
         run_dir,
     )
     return 0 if status["integrity_ok"] else 2
+
+
+def ingest_governance_evidence(settings: Settings) -> int:
+    """
+    Ingests the latest governance-critical lifecycle/endurance artifacts into the canonical evidence store.
+
+    This is the supported path to ensure demo readiness does not depend on loose run
+    directories when authoritative evidence already exists inside the project.
+    """
+    run_dir = build_run_directory(settings.data.runs_dir, "ingest_governance_evidence")
+    logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
+
+    registry = load_strategy_profile_registry(settings)
+    separation = build_portfolio_separation(settings, registry)
+    target_symbols = (
+        tuple(separation.approved_demo_universe)
+        or tuple(separation.active_portfolio)
+        or tuple(symbol for symbol in settings.trading.symbols if symbol not in separation.deliberately_blocked)
+    )
+
+    lifecycle = _latest_lifecycle_evidence(settings)
+    lifecycle_report: dict[str, Any]
+    if lifecycle is None:
+        lifecycle_report = {
+            "ok": False,
+            "reason": "no_lifecycle_evidence_available",
+            "entry_id": "",
+            "source_path": "",
+        }
+    else:
+        lifecycle_path = Path(str(lifecycle.get("report_path", "")))
+        lifecycle_source_run_id = str(lifecycle.get("source_run_id", "") or lifecycle_path.parent.name)
+        entry = ingest_evidence(
+            settings,
+            lifecycle_path,
+            "lifecycle_reconciliation",
+            lifecycle_source_run_id,
+            provenance=str(lifecycle.get("origin", "governance_ingest")),
+        )
+        lifecycle_report = {
+            "ok": True,
+            "reason": "ok",
+            "entry_id": entry["entry_id"],
+            "source_path": str(lifecycle_path),
+            "source_run_id": lifecycle_source_run_id,
+        }
+
+    endurance_reports: dict[str, Any] = {}
+    for symbol in target_symbols:
+        endurance = _latest_endurance_evidence(settings, symbol)
+        if endurance is None:
+            endurance_reports[symbol] = {
+                "ok": False,
+                "reason": "no_endurance_evidence_available",
+                "entry_id": "",
+                "source_path": "",
+            }
+            continue
+        endurance_run_dir = Path(str(endurance.get("run_dir", "")))
+        source_path = endurance_run_dir / "symbol_stability_report.json"
+        source_run_id = endurance_run_dir.name
+        entry = ingest_evidence(
+            settings,
+            source_path,
+            "symbol_stability",
+            source_run_id,
+            symbol=symbol,
+            provenance="latest_endurance_evidence",
+        )
+        endurance_reports[symbol] = {
+            "ok": True,
+            "reason": "ok",
+            "entry_id": entry["entry_id"],
+            "source_path": str(source_path),
+            "source_run_id": source_run_id,
+        }
+
+    status = evidence_store_status(settings)
+    report = {
+        "target_symbols": list(target_symbols),
+        "lifecycle_ingest": lifecycle_report,
+        "endurance_ingest": endurance_reports,
+        "evidence_store_status": status,
+    }
+    write_json_report(
+        run_dir,
+        "governance_evidence_ingest_report.json",
+        wrap_artifact(
+            "governance_evidence_ingest",
+            report,
+            provenance=build_artifact_provenance(
+                run_dir=run_dir,
+                correlation_keys={"command": "ingest_governance_evidence"},
+                references={"manifest_path": status["manifest_path"]},
+            ),
+        ),
+    )
+    logger.info(
+        "ingest_governance_evidence lifecycle_ok=%s endurance_ok=%s run_dir=%s",
+        lifecycle_report["ok"],
+        sum(1 for payload in endurance_reports.values() if payload["ok"]),
+        run_dir,
+    )
+    return 0 if lifecycle_report["ok"] and all(payload["ok"] for payload in endurance_reports.values()) else 2
 
 
 def approved_demo_gate_audit(settings: Settings) -> int:
@@ -665,11 +833,11 @@ def approved_demo_gate_audit(settings: Settings) -> int:
     registry = load_strategy_profile_registry(settings)
     symbols = _promotion_review_symbols(settings, registry)
     if not symbols:
-        # Include all eligible symbols in the audit even if not validated
-        from iris_bot.portfolio import _PERMANENTLY_EXCLUDED
-        symbols = tuple(s for s in settings.trading.symbols if s not in _PERMANENTLY_EXCLUDED)
+        blocked_symbols = deliberately_blocked_symbols(settings)
+        symbols = tuple(s for s in settings.trading.symbols if s not in blocked_symbols)
 
     gate_cfg = settings.approved_demo_gate
+    governance_policy = load_governance_policy(settings)
     gate_config_report = {
         "min_trade_count": gate_cfg.min_trade_count,
         "max_no_trade_ratio": gate_cfg.max_no_trade_ratio,
@@ -691,6 +859,10 @@ def approved_demo_gate_audit(settings: Settings) -> int:
 
     payload = {
         "gate_config": gate_config_report,
+        "governance_policy": {
+            "policy_version": governance_policy["policy_version"],
+            "policy_source": governance_policy["policy_source"],
+        },
         "symbols_audited": list(symbols),
         "approved_demo_ready": approved,
         "blocked_by_gate": blocked_by_gate,
@@ -698,6 +870,7 @@ def approved_demo_gate_audit(settings: Settings) -> int:
             symbol: {
                 "final_decision": r["final_decision"],
                 "reasons": r["reasons"],
+                "policy_context": r["policy_context"],
                 "gate_matrix": r["gate_matrix"],
                 "endurance_summary": r["endurance_summary"],
                 "lifecycle_summary": r["lifecycle_summary"],
@@ -705,7 +878,21 @@ def approved_demo_gate_audit(settings: Settings) -> int:
             for symbol, r in reviews.items()
         },
     }
-    write_json_report(run_dir, "approved_demo_gate_audit_report.json", wrap_artifact("approved_demo_gate_audit", payload))
+    write_json_report(
+        run_dir,
+        "approved_demo_gate_audit_report.json",
+        wrap_artifact(
+            "approved_demo_gate_audit",
+            payload,
+            provenance=build_artifact_provenance(
+                run_dir=run_dir,
+                policy_version=str(governance_policy["policy_version"]),
+                policy_source=str(governance_policy["policy_source"]),
+                correlation_keys={"command": "approved_demo_gate_audit"},
+                references={"registry_path": str(registry_path(settings))},
+            ),
+        ),
+    )
     logger.info(
         "approved_demo_gate_audit approved=%s blocked=%s run_dir=%s",
         len(approved), len(blocked_by_gate), run_dir,
@@ -732,8 +919,16 @@ def active_portfolio_status(settings: Settings) -> int:
     registry = load_strategy_profile_registry(settings)
     portfolio_report = active_portfolio_status_report(settings, registry)
     universe_report = active_universe_status_report(settings, registry)
-    write_json_report(run_dir, "active_portfolio_status.json", wrap_artifact("active_portfolio_status", portfolio_report))
-    write_json_report(run_dir, "active_universe_status.json", wrap_artifact("active_universe_status", universe_report))
+    governance_policy = load_governance_policy(settings)
+    provenance = build_artifact_provenance(
+        run_dir=run_dir,
+        policy_version=str(governance_policy["policy_version"]),
+        policy_source=str(governance_policy["policy_source"]),
+        correlation_keys={"command": "active_portfolio_status"},
+        references={"registry_path": str(registry_path(settings))},
+    )
+    write_json_report(run_dir, "active_portfolio_status.json", wrap_artifact("active_portfolio_status", portfolio_report, provenance=provenance))
+    write_json_report(run_dir, "active_universe_status.json", wrap_artifact("active_universe_status", universe_report, provenance=provenance))
     logger.info(
         "active_portfolio_status portfolio_size=%s approved_demo_size=%s run_dir=%s",
         portfolio_report["summary"]["active_portfolio_size"],

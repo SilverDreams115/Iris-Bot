@@ -7,6 +7,7 @@ from iris_bot.mt5 import MT5Client, OrderRequest, resolve_mt5_timeframe
 
 FakeRate = namedtuple("FakeRate", ["time", "open", "high", "low", "close", "tick_volume"])
 FakeTick = namedtuple("FakeTick", ["ask", "bid"])
+FakeRecord = namedtuple("FakeRecord", ["symbol", "magic", "comment", "ticket", "volume", "type"])
 FakeSymbolInfo = namedtuple(
     "FakeSymbolInfo",
     ["visible", "trade_mode", "volume_min", "volume_step", "volume_max", "filling_mode"],
@@ -34,6 +35,9 @@ class FakeMT5:
         self.login_calls = 0
         self.account_available = True
         self.terminal_available = True
+        self.positions: list[FakeRecord] = []
+        self.orders: list[FakeRecord] = []
+        self.deals: list[FakeRecord] = []
 
     def initialize(self, **_: object) -> bool:
         self.initialize_calls.append(_)
@@ -77,6 +81,15 @@ class FakeMT5:
 
     def symbol_info_tick(self, symbol: str) -> FakeTick | None:
         return None if symbol == "NO_TICK" else FakeTick(1.1002, 1.1000)
+
+    def positions_get(self):
+        return self.positions
+
+    def orders_get(self):
+        return self.orders
+
+    def history_deals_get(self, *_: object):
+        return self.deals
 
 
 def test_resolve_mt5_timeframe() -> None:
@@ -212,3 +225,57 @@ def test_dry_run_rejects_unsupported_filling_mode() -> None:
     assert result.accepted is False
     assert result.reason == "symbol_validation_failed"
     assert any(item.code == "filling_mode_invalid" for item in result.validations)
+
+
+def test_broker_snapshot_strict_policy_does_not_claim_foreign_same_symbol_position() -> None:
+    mt5 = FakeMT5()
+    mt5.positions = [
+        FakeRecord("EURUSD", 11111, "Foreign strategy", 1, 0.10, 0),
+        FakeRecord("EURUSD", 20260401, "IRIS-Bot managed", 2, 0.10, 0),
+    ]
+    client = MT5Client(
+        replace(MT5Config(), enabled=True, ownership_mode="strict"),
+        mt5_module=mt5,
+    )
+    client.connect()
+
+    snapshot = client.broker_state_snapshot(("EURUSD",))
+
+    assert [item["ticket"] for item in snapshot.positions] == [2]
+    assert snapshot.positions[0]["ownership_reason"] == "magic_match"
+    assert snapshot.scope_report["ignored_positions"] == 1
+    assert snapshot.scope_report["audit_visible_positions"][0]["ownership_reason"] == "symbol_scope_only"
+    assert snapshot.scope_report["ownership_mode"] == "strict"
+
+
+def test_broker_snapshot_compatibility_policy_keeps_symbol_scope_for_owned_records() -> None:
+    mt5 = FakeMT5()
+    mt5.positions = [FakeRecord("EURUSD", 11111, "Foreign strategy", 1, 0.10, 0)]
+    client = MT5Client(
+        replace(MT5Config(), enabled=True, ownership_mode="compatibility"),
+        mt5_module=mt5,
+    )
+    client.connect()
+
+    snapshot = client.broker_state_snapshot(("EURUSD",))
+
+    assert [item["ticket"] for item in snapshot.positions] == [1]
+    assert snapshot.positions[0]["ownership_reason"] == "symbol_scope_only"
+    assert snapshot.scope_report["ignored_positions"] == 0
+
+
+def test_broker_snapshot_audit_only_policy_preserves_visibility_without_operational_ownership() -> None:
+    mt5 = FakeMT5()
+    mt5.positions = [FakeRecord("EURUSD", 11111, "Foreign strategy", 1, 0.10, 0)]
+    client = MT5Client(
+        replace(MT5Config(), enabled=True, ownership_mode="audit_only"),
+        mt5_module=mt5,
+    )
+    client.connect()
+
+    snapshot = client.broker_state_snapshot(("EURUSD",))
+
+    assert snapshot.positions == []
+    assert snapshot.scope_report["ignored_positions"] == 1
+    assert snapshot.scope_report["audit_visible_positions"][0]["ownership_reason"] == "symbol_scope_only"
+    assert snapshot.scope_report["audit_visible_positions"][0]["owned_by_bot"] is False

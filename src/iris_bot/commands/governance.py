@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from iris_bot.config import Settings
+from iris_bot.demo_operational_readiness import demo_operational_readiness
 from iris_bot.demo_readiness import demo_execution_readiness
+from iris_bot.prolonged_serious_demo import demo_forward_runbook_command, prolonged_serious_demo_gate, demo_serious_validated_gate
+from iris_bot.serious_demo_gate import serious_demo_control_gate
 from iris_bot.governance import (
     active_portfolio_status,
     active_strategy_status,
@@ -9,6 +12,7 @@ from iris_bot.governance import (
     audit_governance_locking,
     diagnose_profile_activation,
     evidence_store_status_command,
+    ingest_governance_evidence,
     list_strategy_profiles,
     materialize_active_profiles,
     repair_strategy_profile_registry,
@@ -79,6 +83,11 @@ def evidence_store_status_cmd(settings: Settings) -> int:
     return evidence_store_status_command(settings)
 
 
+def ingest_governance_evidence_command(settings: Settings) -> int:
+    """Ingests latest lifecycle/endurance governance evidence into the canonical evidence store."""
+    return ingest_governance_evidence(settings)
+
+
 def approved_demo_gate_audit_command(settings: Settings) -> int:
     """Detailed gate audit showing exactly which checks pass/fail per symbol."""
     return approved_demo_gate_audit(settings)
@@ -92,3 +101,28 @@ def active_portfolio_status_command(settings: Settings) -> int:
 def demo_execution_readiness_command(settings: Settings) -> int:
     """Conservative readiness assessment for broker-executing demo (no order_send)."""
     return demo_execution_readiness(settings)
+
+
+def demo_operational_readiness_command(settings: Settings) -> int:
+    """Operational credibility gate: validates all 6 operational resilience blocks."""
+    return demo_operational_readiness(settings)
+
+
+def serious_demo_control_gate_command(settings: Settings) -> int:
+    """Serious demo control gate: validates readiness for controlled serious demo execution."""
+    return serious_demo_control_gate(settings)
+
+
+def prolonged_serious_demo_gate_command(settings: Settings) -> int:
+    """Prolonged serious demo gate: validates cumulative forward demo evidence."""
+    return prolonged_serious_demo_gate(settings)
+
+
+def demo_serious_validated_gate_command(settings: Settings) -> int:
+    """Demo serious validated gate: cumulative multi-series forward validation."""
+    return demo_serious_validated_gate(settings)
+
+
+def demo_forward_runbook_runtime_command(settings: Settings) -> int:
+    """Writes the short controlled execution runbook for prolonged demo validation."""
+    return demo_forward_runbook_command(settings)

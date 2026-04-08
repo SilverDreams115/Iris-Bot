@@ -8,6 +8,7 @@ Verifies:
   - Insufficient rows for walk-forward windows produces empty result
   - Consistency check runs per fold
 """
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -150,6 +151,11 @@ def test_wf_backtest_fold_artifacts_exist(tmp_path: Path) -> None:
         fold_dir = run_dir / f"fold_{fold_index:02d}"
         assert (fold_dir / "equity_curve.csv").exists(), f"fold_{fold_index:02d}/equity_curve.csv missing"
         assert (fold_dir / "fold_report.json").exists(), f"fold_{fold_index:02d}/fold_report.json missing"
+        payload = json.loads((fold_dir / "fold_report.json").read_text(encoding="utf-8"))
+        assert payload["training_contract_version"] == "1.0"
+        assert payload["evaluation_contract_version"] == "1.0"
+        assert payload["training_contract"]["economic_sample_weighting"]["enabled"] is True
+        assert payload["evaluation_contract"]["threshold_application"]["policy"] == "max_global_and_profile_threshold"
 
 
 def test_wf_backtest_each_fold_has_fresh_balance(tmp_path: Path) -> None:

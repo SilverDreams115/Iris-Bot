@@ -250,6 +250,8 @@ def test_gate_blocks_usdjpy_always(tmp_path, monkeypatch):
     review = _review(settings, "USDJPY")
     assert review["final_decision"] == "REVERT_TO_BLOCKED"
     assert any("out_of_scope" in r for r in review["reasons"])
+    assert review["policy_context"]["rule_id"] == "symbol_out_of_scope_for_promotion"
+    assert review["policy_context"]["policy_version"] == "governance_policy.v1"
 
 
 # --- APPROVAL case ---

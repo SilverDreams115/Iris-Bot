@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from iris_bot.config import Settings
-from iris_bot.soak import regenerate_go_no_go_report, run_chaos_scenario, run_soak
+from iris_bot.soak import regenerate_go_no_go_report, run_chaos_scenario, run_demo_guarded_soak, run_soak
 from iris_bot.symbol_endurance import audit_endurance_reporting, run_symbol_endurance, symbol_stability_report
 
 
 def run_paper_soak_command(settings: Settings) -> int:
     exit_code, _ = run_soak(settings, mode="paper", require_broker=False)
+    return exit_code
+
+
+def run_demo_guarded_soak_command(settings: Settings) -> int:
+    exit_code, _ = run_demo_guarded_soak(settings, mode="paper", require_broker=False)
     return exit_code
 
 

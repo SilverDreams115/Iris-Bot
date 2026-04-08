@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
-import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from iris_bot.durable_io import durable_write_json, durable_write_text
 
 @dataclass(frozen=True)
 class ExitPolicyConfig:
@@ -214,6 +215,7 @@ class PaperRunArtifacts:
     state: PaperEngineState
     events: list[OperationalEvent]
     closed_trades: list[ClosedPaperTrade]
+    equity_curve_rows: list[dict[str, Any]]
     daily_summary: dict[str, Any]
     run_report: dict[str, Any]
     validation_report: dict[str, Any]
@@ -233,43 +235,40 @@ def new_session_id(prefix: str) -> str:
 
 def write_events_csv(path: Path, events: list[OperationalEvent]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    buffer = io.StringIO(newline="")
+    with buffer:
         writer = csv.DictWriter(
-            handle,
+            buffer,
             fieldnames=["event_type", "timestamp", "symbol", "status", "reason", "details_json"],
         )
         writer.writeheader()
         for event in events:
             writer.writerow(event.to_row())
+        durable_write_text(path, buffer.getvalue())
 
 
 def write_rows_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    buffer = io.StringIO(newline="")
+    with buffer:
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+        durable_write_text(path, buffer.getvalue())
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    durable_write_json(path, payload)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp_path, path)
+    durable_write_json(path, payload)
 
 
 def write_alerts_jsonl(path: Path, alerts: list[AlertRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for alert in alerts:
-            handle.write(json.dumps(asdict(alert), sort_keys=True))
-            handle.write("\n")
+    durable_write_text(path, "".join(f"{json.dumps(asdict(alert), sort_keys=True)}\n" for alert in alerts))
 
 
 def write_operational_artifacts(
@@ -321,6 +320,11 @@ def write_operational_artifacts(
             "take_profit_price",
             "details_json",
         ],
+    )
+    write_rows_csv(
+        run_dir / "equity_curve.csv",
+        artifacts.equity_curve_rows,
+        ["timestamp", "balance", "equity", "open_positions"],
     )
     closed_payload = []
     for trade in artifacts.closed_trades:

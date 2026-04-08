@@ -7,6 +7,7 @@ from typing import Any
 
 from iris_bot.artifacts import read_artifact_payload, wrap_artifact
 from iris_bot.config import Settings
+from iris_bot.durable_io import durable_write_json
 from iris_bot.governance_active import resolve_active_profile_entry
 from iris_bot.logging_utils import write_json_report
 from iris_bot.xgb_model import XGBoostMultiClassModel
@@ -72,23 +73,42 @@ def build_model_artifact_manifest(
 
 def write_model_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            wrap_artifact(
-                "model_artifact_manifest",
-                payload,
-                compatibility={"loader": "load_model_artifact_manifest"},
-            ),
-            indent=2,
-            sort_keys=True,
+    durable_write_json(
+        path,
+        wrap_artifact(
+            "model_artifact_manifest",
+            payload,
+            compatibility={"loader": "load_model_artifact_manifest"},
         ),
-        encoding="utf-8",
     )
     return path
 
 
 def load_model_artifact_manifest(path: Path) -> dict[str, Any]:
     return read_artifact_payload(path, expected_type="model_artifact_manifest")
+
+
+def _resolve_runtime_project_path(settings: Settings, path_value: str) -> Path:
+    candidate = Path(path_value) if path_value else Path()
+    if not path_value:
+        return candidate
+    if candidate.exists():
+        return candidate
+    normalized = path_value.replace("\\", "/")
+    project_marker = f"/{settings.project_root.name}/"
+    if project_marker in normalized:
+        suffix = normalized.split(project_marker, 1)[1]
+        remapped = settings.project_root / Path(suffix)
+        if remapped.exists():
+            return remapped
+    for anchor in ("/data/", "/runs/", "/config/", "/src/"):
+        if anchor not in normalized:
+            continue
+        suffix = normalized.split(anchor, 1)[1]
+        remapped = settings.project_root / Path(anchor.strip("/") + "/" + suffix)
+        if remapped.exists():
+            return remapped
+    return candidate
 
 
 def validate_model_artifact(
@@ -98,6 +118,7 @@ def validate_model_artifact(
     manifest_path: Path,
     require_active_profile: bool = True,
 ) -> dict[str, Any]:
+    manifest_path = _resolve_runtime_project_path(settings, str(manifest_path))
     reasons: list[str] = []
     warnings: list[str] = []
     manifest_exists = manifest_path.exists()
@@ -110,10 +131,13 @@ def validate_model_artifact(
         except Exception as exc:  # noqa: BLE001
             reasons.append(f"manifest_unreadable:{exc}")
 
-    model_path = Path(str(manifest.get("model_path", ""))) if manifest else Path()
-    metadata_path = Path(str(manifest.get("metadata_path", ""))) if manifest else Path()
+    model_path = _resolve_runtime_project_path(settings, str(manifest.get("model_path", ""))) if manifest else Path()
+    metadata_path = _resolve_runtime_project_path(settings, str(manifest.get("metadata_path", ""))) if manifest else Path()
     metadata: dict[str, Any] = {}
     if manifest:
+        manifest = dict(manifest)
+        manifest["model_path"] = str(model_path)
+        manifest["metadata_path"] = str(metadata_path)
         if int(manifest.get("schema_version", -1)) != MODEL_ARTIFACT_SCHEMA_VERSION:
             reasons.append("manifest_schema_version_incompatible")
         if str(manifest.get("symbol", "")) != symbol:

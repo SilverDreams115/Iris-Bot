@@ -128,6 +128,28 @@ def test_triple_barrier_label_timeout_direction() -> None:
     assert "timeout" in outcome.label_reason
 
 
+def test_triple_barrier_label_timeout_can_be_filtered_to_neutral() -> None:
+    start = datetime(2026, 1, 1)
+    bars = [
+        Bar(start, "EURUSD", "M5", 1.1000, 1.1002, 1.0998, 1.1000, 100),
+        Bar(start + timedelta(minutes=5), "EURUSD", "M5", 1.1000, 1.1002, 1.0999, 1.1002, 100),
+        Bar(start + timedelta(minutes=10), "EURUSD", "M5", 1.1002, 1.1004, 1.1000, 1.1004, 100),
+    ]
+    config = LabelingConfig(
+        mode="triple_barrier",
+        horizon_bars=2,
+        take_profit_pct=0.0020,
+        stop_loss_pct=0.0020,
+        min_abs_return=0.0001,
+        timeout_handling_mode="neutral_by_barrier_fraction",
+        timeout_direction_min_barrier_fraction=0.50,
+    )
+    outcome = triple_barrier_label(bars, 0, config)
+    assert outcome is not None
+    assert outcome.label == 0
+    assert outcome.label_reason == "triple_barrier_timeout_filtered_small_move"
+
+
 def test_triple_barrier_label_returns_none_when_not_enough_bars() -> None:
     start = datetime(2026, 1, 1)
     bars = [

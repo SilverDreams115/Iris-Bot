@@ -15,6 +15,8 @@ from iris_bot.operational import (
 )
 from iris_bot.resilient_models import RestoreReport, now_iso
 
+STATE_SCHEMA_VERSION = 1
+
 
 def fresh_state(starting_balance: float, mode: str) -> PaperEngineState:
     state = PaperEngineState(
@@ -34,6 +36,7 @@ def persist_runtime_state(
         path,
         {
             "saved_at": now_iso(),
+            "schema_version": STATE_SCHEMA_VERSION,
             "state": state.to_dict(),
             "latest_broker_sync_result": latest_broker_sync_result,
         },
@@ -52,12 +55,54 @@ def restore_runtime_state(path: Path, require_clean: bool) -> tuple[PaperEngineS
     if not isinstance(state_payload, dict):
         action = "blocked" if require_clean else "log_only"
         return None, RestoreReport(False, action, ["state_missing_payload"], False, str(path))
+    schema_version = payload.get("schema_version")
+    issues: list[str] = []
+    if schema_version is None:
+        issues.append("schema_version_missing:legacy_state")
+    elif schema_version != STATE_SCHEMA_VERSION:
+        issues.append(f"schema_version_mismatch:found={schema_version},expected={STATE_SCHEMA_VERSION}")
     try:
         state = state_from_dict(state_payload)
     except Exception as exc:  # noqa: BLE001
         action = "blocked" if require_clean else "log_only"
         return None, RestoreReport(False, action, [f"state_restore_failed:{exc}"], False, str(path))
-    return state, RestoreReport(True, "soft_resync", [], True, str(path))
+    invariant_issues = validate_restored_state_invariants(state)
+    if invariant_issues:
+        action = "blocked" if require_clean else "log_only"
+        return None, RestoreReport(False, action, invariant_issues, True, str(path))
+    return state, RestoreReport(True, "soft_resync", issues, True, str(path))
+
+
+def validate_restored_state_invariants(state: PaperEngineState) -> list[str]:
+    """Check hard invariants on a freshly-restored state.
+
+    Returns a list of violation strings; empty list means the state is clean.
+    These are structural integrity checks, not business logic.
+    """
+    issues: list[str] = []
+    # No duplicate processed event IDs
+    event_ids = state.processing_state.processed_event_ids
+    if len(event_ids) != len(set(event_ids)):
+        dupes = len(event_ids) - len(set(event_ids))
+        issues.append(f"duplicate_processed_event_ids:{dupes}")
+    # Each open position must have a valid symbol
+    for symbol, pos in state.open_positions.items():
+        if symbol != pos.symbol:
+            issues.append(f"position_symbol_key_mismatch:{symbol}!={pos.symbol}")
+        if pos.volume_lots <= 0.0:
+            issues.append(f"position_invalid_volume:{symbol}:{pos.volume_lots}")
+        if pos.direction not in {1, -1}:
+            issues.append(f"position_invalid_direction:{symbol}:{pos.direction}")
+    # Each pending intent must have a valid symbol and side
+    for i, intent in enumerate(state.pending_intents):
+        if not intent.symbol:
+            issues.append(f"pending_intent_missing_symbol:index={i}")
+        if intent.side not in {"buy", "sell"}:
+            issues.append(f"pending_intent_invalid_side:index={i}:{intent.side}")
+    # Balance must be positive
+    if state.account_state.balance_usd <= 0:
+        issues.append(f"account_balance_non_positive:{state.account_state.balance_usd}")
+    return issues
 
 
 def state_from_dict(payload: dict[str, Any]) -> PaperEngineState:

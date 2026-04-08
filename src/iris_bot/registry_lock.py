@@ -25,10 +25,12 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator, TextIO
 
 if os.name == "nt":
-    import msvcrt
+    import msvcrt as _msvcrt
+
+    msvcrt: Any = _msvcrt
 else:
     import fcntl
 
@@ -41,7 +43,15 @@ class RegistryLockTimeoutError(Exception):
     """Raised when the exclusive lock cannot be acquired within the configured timeout."""
 
 
-def _try_lock_nonblocking(handle: object) -> bool:
+class FileMutationConflictError(RegistryMutationConflictError):
+    """Generic file mutation conflict for transactional sidecar-locked files."""
+
+
+class FileLockTimeoutError(RegistryLockTimeoutError):
+    """Generic timeout while acquiring a sidecar file lock."""
+
+
+def _try_lock_nonblocking(handle: TextIO) -> bool:
     if os.name == "nt":
         try:
             handle.seek(0)
@@ -56,7 +66,7 @@ def _try_lock_nonblocking(handle: object) -> bool:
         return False
 
 
-def _unlock(handle: object) -> None:
+def _unlock(handle: TextIO) -> None:
     if os.name == "nt":
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -64,7 +74,7 @@ def _unlock(handle: object) -> None:
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def registry_etag(path: Path) -> str:
+def file_etag(path: Path) -> str:
     """
     Returns a stable content hash of the registry file.
 
@@ -81,8 +91,8 @@ def registry_etag(path: Path) -> str:
 
 
 @contextlib.contextmanager
-def registry_exclusive_lock(
-    registry_path: Path,
+def file_exclusive_lock(
+    target_path: Path,
     timeout_seconds: float = 15.0,
     expected_etag: str | None = None,
 ) -> Generator[None, None, None]:
@@ -90,7 +100,7 @@ def registry_exclusive_lock(
     Acquires an exclusive write lock on {registry_path}.lock.
 
     Args:
-        registry_path: Path to the registry JSON file being mutated.
+        target_path: Path to the JSON file being mutated.
         timeout_seconds: How long to spin before raising RegistryLockTimeoutError.
         expected_etag: If provided, the file content hash captured BEFORE the
             caller's pre-computation. After acquiring the lock, the current hash
@@ -102,7 +112,7 @@ def registry_exclusive_lock(
         - The registry file matches expected_etag (if provided)
         - Caller MUST re-read the registry inside the block to get authoritative state
     """
-    lock_path = registry_path.with_suffix(registry_path.suffix + ".lock")
+    lock_path = target_path.with_suffix(target_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     fh = lock_path.open("a+", encoding="utf-8")
@@ -117,7 +127,7 @@ def registry_exclusive_lock(
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise RegistryLockTimeoutError(
+                    raise FileLockTimeoutError(
                         f"Could not acquire exclusive lock on {lock_path} "
                         f"within {timeout_seconds}s. Another process may be holding it."
                     )
@@ -131,12 +141,12 @@ def registry_exclusive_lock(
 
         # Conflict detection: verify registry has not been mutated since caller's read
         if expected_etag is not None:
-            current_etag = registry_etag(registry_path)
+            current_etag = file_etag(target_path)
             if current_etag != expected_etag:
                 # Release before raising so other waiters can proceed
                 _unlock(fh)
-                raise RegistryMutationConflictError(
-                    f"Registry {registry_path.name} was mutated by a concurrent process "
+                raise FileMutationConflictError(
+                    f"File {target_path.name} was mutated by a concurrent process "
                     f"between pre-computation and lock acquisition. "
                     f"Pre-computation etag: {expected_etag[:16]!r}, "
                     f"current etag: {current_etag[:16]!r}. "
@@ -152,6 +162,20 @@ def registry_exclusive_lock(
             _unlock(fh)
     finally:
         fh.close()
+
+
+def registry_etag(path: Path) -> str:
+    return file_etag(path)
+
+
+@contextlib.contextmanager
+def registry_exclusive_lock(
+    registry_path: Path,
+    timeout_seconds: float = 15.0,
+    expected_etag: str | None = None,
+) -> Generator[None, None, None]:
+    with file_exclusive_lock(registry_path, timeout_seconds=timeout_seconds, expected_etag=expected_etag):
+        yield
 
 
 def governance_lock_audit(registry_path: Path) -> dict:

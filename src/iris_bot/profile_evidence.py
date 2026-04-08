@@ -47,9 +47,9 @@ def _is_within_project(settings: Settings, path: Path) -> bool:
         resolved = path.resolve()
     except OSError:
         return False
-    for root in [settings.project_root.resolve(), settings.data.runs_dir.resolve()]:
+    for resolved_root in [settings.project_root.resolve(), settings.data.runs_dir.resolve()]:
         try:
-            resolved.relative_to(root)
+            resolved.relative_to(resolved_root)
             return True
         except ValueError:
             continue
@@ -138,7 +138,7 @@ def _latest_lifecycle_evidence(settings: Settings) -> dict[str, Any] | None:
                         "report_path": canonical_path,
                         "generated_at": store_entry.get("created_at", ""),
                         "payload": payload,
-                        "audit_ok": None,
+                        "audit_ok": bool(payload.get("ok", False)),
                         "source_run_id": store_entry.get("source_run_id", ""),
                         "provenance": store_entry.get("provenance", ""),
                     })
@@ -151,12 +151,13 @@ def _latest_lifecycle_evidence(settings: Settings) -> dict[str, Any] | None:
         report_path = latest_local / "lifecycle_reconciliation_report.json"
         if report_path.exists():
             try:
+                payload = read_artifact_payload(report_path, expected_type="lifecycle_reconciliation")
                 candidates.append({
                     "origin": "local_lifecycle_reconciliation",
                     "report_path": report_path,
                     "generated_at": _artifact_generated_at(report_path),
-                    "payload": read_artifact_payload(report_path, expected_type="lifecycle_reconciliation"),
-                    "audit_ok": None,
+                    "payload": payload,
+                    "audit_ok": bool(payload.get("ok", False)),
                 })
             except (OSError, ValueError):
                 pass

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from iris_bot.artifacts import read_artifact_payload, wrap_artifact
+from iris_bot.artifacts import build_artifact_provenance, read_artifact_payload, wrap_artifact
 from iris_bot.config import Settings
 from iris_bot.operational import atomic_write_json
 from iris_bot.symbols import SymbolStrategyProfile, default_symbol_strategy_profile, strategy_profiles_path
@@ -212,6 +212,7 @@ def _materialize_active_profiles_from_registry(
 ) -> None:
     """Writes active_strategy_profiles.json with ONLY approved_demo entries."""
     active_symbols: dict[str, Any] = {}
+    source_run_ids: set[str] = set()
     for symbol in settings.trading.symbols:
         active_id = registry.get("active_profiles", {}).get(symbol, "")
         if not active_id:
@@ -220,8 +221,16 @@ def _materialize_active_profiles_from_registry(
         if entry is None or entry.get("promotion_state") != "approved_demo":
             continue
         active_symbols[symbol] = dict(entry["profile_payload"])
+        source_run_id = str(entry.get("source_run_id", "") or "")
+        if source_run_id:
+            source_run_ids.add(source_run_id)
 
     path = active_strategy_profiles_path(settings)
+    lineage_id = (
+        sorted(source_run_ids)[0]
+        if len(source_run_ids) == 1
+        else "registry_materialization"
+    )
     atomic_write_json(
         path,
         wrap_artifact(
@@ -233,6 +242,12 @@ def _materialize_active_profiles_from_registry(
                 "note": "Only approved_demo profiles. Use strategy_profiles.json for full historical sync.",
             },
             compatibility={"consumer": "paper_engine", "loader": "active_strategy_profiles"},
+            provenance=build_artifact_provenance(
+                source_run_id=lineage_id,
+                lineage_id=lineage_id,
+                correlation_keys={"artifact_role": "active_profile_materialization"},
+                references={"registry_path": str(registry_path(settings))},
+            ),
         ),
     )
 

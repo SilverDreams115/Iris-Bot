@@ -1,0 +1,177 @@
+{
+  "artifact_type": "lifecycle_reconciliation",
+  "artifact_version": "lifecycle_reconciliation.v1",
+  "checksum": "5ed8d5ae560f955d3b12e03b70d4de3d33ba8db1918addf30c8905d65b8ed890",
+  "compatibility": {},
+  "generated_at": "2026-04-06T23:29:13.808884+00:00",
+  "payload": {
+    "critical_mismatch_count": 1,
+    "mismatch_counts": {
+      "broker_event_without_local_intent": 1
+    },
+    "mismatches": [
+      {
+        "category": "broker_event_without_local_intent",
+        "details": {
+          "symbol": "EURUSD"
+        },
+        "message": "Broker scope activity exists without local evidence",
+        "severity": "critical"
+      }
+    ],
+    "ok": false,
+    "restore_state_report": {
+      "action": "soft_resync",
+      "issues": [],
+      "ok": true,
+      "restored": true,
+      "state_path": "C:\\Temp\\IRIS-Bot-mt5-runtime\\workspace\\20260406T232907Z\\data\\runtime\\runtime_state.json"
+    },
+    "scope_report": {
+      "audit_visible_deals": [
+        {
+          "comment": "IRIS-Bot demo dr",
+          "commission": 0.0,
+          "entry": 0,
+          "external_id": "",
+          "fee": 0.0,
+          "in_symbol_scope": true,
+          "magic": 20260401,
+          "order": 56083365706,
+          "owned_by_bot": true,
+          "ownership_reason": "magic_match",
+          "position_id": 56083365706,
+          "price": 1.15113,
+          "profit": 0.0,
+          "reason": 3,
+          "swap": 0.0,
+          "symbol": "EURUSD",
+          "ticket": 55790433668,
+          "time": 1775444117,
+          "time_msc": 1775444117265,
+          "type": 0,
+          "visible_for_audit": true,
+          "volume": 0.01
+        },
+        {
+          "comment": "IRIS-Bot close",
+          "commission": 0.0,
+          "entry": 1,
+          "external_id": "",
+          "fee": 0.0,
+          "in_symbol_scope": true,
+          "magic": 20260401,
+          "order": 56083365757,
+          "owned_by_bot": true,
+          "ownership_reason": "magic_match",
+          "position_id": 56083365706,
+          "price": 1.15107,
+          "profit": -0.06,
+          "reason": 3,
+          "swap": 0.0,
+          "symbol": "EURUSD",
+          "ticket": 55790433716,
+          "time": 1775444117,
+          "time_msc": 1775444117438,
+          "type": 1,
+          "visible_for_audit": true,
+          "volume": 0.01
+        }
+      ],
+      "audit_visible_orders": [
+        {
+          "comment": "IRIS-Bot demo dr",
+          "external_id": "",
+          "in_symbol_scope": true,
+          "magic": 20260401,
+          "owned_by_bot": true,
+          "ownership_reason": "magic_match",
+          "position_by_id": 0,
+          "position_id": 56083365706,
+          "price_current": 1.15113,
+          "price_open": 0.0,
+          "price_stoplimit": 0.0,
+          "reason": 3,
+          "sl": 1.14998,
+          "state": 4,
+          "symbol": "EURUSD",
+          "ticket": 56083365706,
+          "time_done": 1775444117,
+          "time_done_msc": 1775444117265,
+          "time_expiration": 0,
+          "time_setup": 1775444117,
+          "time_setup_msc": 1775444117265,
+          "tp": 1.15286,
+          "type": 0,
+          "type_filling": 0,
+          "type_time": 0,
+          "visible_for_audit": true,
+          "volume_current": 0.0,
+          "volume_initial": 0.01
+        },
+        {
+          "comment": "IRIS-Bot close",
+          "external_id": "",
+          "in_symbol_scope": true,
+          "magic": 20260401,
+          "owned_by_bot": true,
+          "ownership_reason": "magic_match",
+          "position_by_id": 0,
+          "position_id": 56083365706,
+          "price_current": 1.15107,
+          "price_open": 0.0,
+          "price_stoplimit": 0.0,
+          "reason": 3,
+          "sl": 0.0,
+          "state": 4,
+          "symbol": "EURUSD",
+          "ticket": 56083365757,
+          "time_done": 1775444117,
+          "time_done_msc": 1775444117438,
+          "time_expiration": 0,
+          "time_setup": 1775444117,
+          "time_setup_msc": 1775444117438,
+          "tp": 0.0,
+          "type": 1,
+          "type_filling": 0,
+          "type_time": 0,
+          "visible_for_audit": true,
+          "volume_current": 0.0,
+          "volume_initial": 0.01
+        }
+      ],
+      "audit_visible_positions": [],
+      "comment_tag": "IRIS-Bot",
+      "ignored_deals": 1,
+      "ignored_orders": 0,
+      "ignored_positions": 0,
+      "magic_number": 20260401,
+      "ownership_filter_active": true,
+      "ownership_mode": "strict",
+      "ownership_policy_version": 1,
+      "reconcile_symbols_only": true
+    },
+    "symbols": {
+      "AUDUSD": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      },
+      "EURUSD": {
+        "critical_mismatch_count": 1,
+        "mismatch_categories": [
+          "broker_event_without_local_intent"
+        ]
+      },
+      "GBPUSD": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      },
+      "USDJPY": {
+        "critical_mismatch_count": 0,
+        "mismatch_categories": []
+      }
+    }
+  },
+  "provenance": {},
+  "schema_version": 1
+}

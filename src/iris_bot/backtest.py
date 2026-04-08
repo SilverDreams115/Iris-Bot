@@ -26,13 +26,14 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 
 from iris_bot.backtest_analysis import (
     compute_signal_probabilities,
     mark_to_market as _mark_to_market,
     trade_metrics as _trade_metrics,
 )
+from iris_bot.artifacts import attach_artifact_provenance, build_artifact_provenance
 from iris_bot.backtest_pricing import (
     build_instrument,
     commission_usd as _commission_usd,
@@ -43,27 +44,26 @@ from iris_bot.backtest_pricing import (
 )
 from iris_bot.config import BacktestConfig, DynamicExitConfig, ExitPolicyRuntimeConfig, RiskConfig, Settings
 from iris_bot.consistency import verify_engine_consistency
+from iris_bot.contract_versions import (
+    EVALUATION_CONTRACT_VERSION,
+    TRAINING_CONTRACT_VERSION,
+    contract_bundle_fingerprint,
+    contract_fingerprint,
+)
+from iris_bot.evaluation_contract import (
+    build_evaluation_contract,
+    filter_reference_rows,
+    filter_rows_by_symbol_profiles,
+    locate_experiment_reference,
+    resolve_threshold_by_symbol,
+)
 from iris_bot.exits import SymbolExitProfile, build_exit_policies
 from iris_bot.logging_utils import build_run_directory, configure_logging, write_json_report
-from iris_bot.processed_dataset import ProcessedDataset, ProcessedRow, load_processed_dataset
+from iris_bot.processed_dataset import ProcessedRow, load_processed_dataset
 from iris_bot.risk import calculate_position_size, realized_pnl_usd
-from iris_bot.symbols import load_symbol_strategy_profiles, row_allowed_by_profile
+from iris_bot.symbols import load_symbol_strategy_profiles
 from iris_bot.thresholds import apply_probability_threshold
 from iris_bot.xgb_model import XGBoostMultiClassModel
-
-
-@dataclass(frozen=True)
-class ExperimentReference:
-    run_dir: Path
-    model_path: Path
-    report_path: Path
-    threshold: float
-    threshold_metric: str
-    threshold_value: float
-    feature_names: list[str]
-    test_start_timestamp: str
-    test_end_timestamp: str
-
 
 @dataclass
 class PendingSignal:
@@ -235,23 +235,23 @@ def _try_enter_position(
     series_index: int,
     pending_signal: PendingSignal,
     instruments: dict,
-    backtest: object,
-    risk: object,
-    stop_policy: object,
-    target_policy: object,
-    dynamic_exit_config: object,
+    backtest: BacktestConfig,
+    risk: RiskConfig,
+    stop_policy: Any,
+    target_policy: Any,
+    dynamic_exit_config: DynamicExitConfig,
     symbol_exit_profiles: dict,
     aux_rates: dict[str, float] | None,
 ) -> None:
     """Attempt to open a position for the pending signal. Mutates state in-place."""
     current_day = row.timestamp.date().isoformat()
     can_open = (
-        len(state.positions) < risk.max_open_positions  # type: ignore[union-attr]
-        and state.daily_realized.get(current_day, 0.0) > -risk.max_daily_loss_usd  # type: ignore[union-attr]
+        len(state.positions) < risk.max_open_positions
+        and state.daily_realized.get(current_day, 0.0) > -risk.max_daily_loss_usd
         and state.cooldown_until_index.get(row.symbol, -1) < series_index
     )
-    direction_ok = (pending_signal.direction == 1 and backtest.allow_long) or (  # type: ignore[union-attr]
-        pending_signal.direction == -1 and backtest.allow_short  # type: ignore[union-attr]
+    direction_ok = (pending_signal.direction == 1 and backtest.allow_long) or (
+        pending_signal.direction == -1 and backtest.allow_short
     )
     if not (can_open and direction_ok):
         return
@@ -259,17 +259,17 @@ def _try_enter_position(
     instrument = instruments[row.symbol]
     entry_price = _entry_execution_price(row.open, pending_signal.direction, instrument, backtest)
     symbol_profile = symbol_exit_profiles.get(row.symbol)
-    stop_level = stop_policy.stop_loss_price(  # type: ignore[union-attr]
+    stop_level = stop_policy.stop_loss_price(
         row=row, entry_price=entry_price, direction=pending_signal.direction,
         backtest=backtest, risk=risk, dynamic_config=dynamic_exit_config, symbol_profile=symbol_profile,
     )
-    target_level = target_policy.take_profit_price(  # type: ignore[union-attr]
+    target_level = target_policy.take_profit_price(
         row=row, entry_price=entry_price, direction=pending_signal.direction,
         backtest=backtest, risk=risk, dynamic_config=dynamic_exit_config, symbol_profile=symbol_profile,
     )
     volume_lots = calculate_position_size(
         balance=state.balance,
-        risk_per_trade=risk.risk_per_trade,  # type: ignore[union-attr]
+        risk_per_trade=risk.risk_per_trade,
         entry_price=entry_price,
         stop_loss_price=stop_level.price,
         instrument=instrument,
@@ -285,7 +285,7 @@ def _try_enter_position(
             signal_probability_short=pending_signal.probability_short,
             entry_price=entry_price,
             stop_loss_price=stop_level.price, take_profit_price=target_level.price,
-            stop_policy=stop_policy.name, target_policy=target_policy.name,  # type: ignore[union-attr]
+            stop_policy=stop_policy.name, target_policy=target_policy.name,
             stop_policy_details=stop_level.details, target_policy_details=target_level.details,
             commission_entry_usd=_commission_usd(volume_lots, backtest),
         )
@@ -299,8 +299,8 @@ def _try_close_position(
     series: list[ProcessedRow],
     series_index: int,
     instruments: dict,
-    backtest: object,
-    risk: object,
+    backtest: BacktestConfig,
+    risk: RiskConfig,
     intrabar_policy: str,
     aux_rates: dict[str, float] | None,
 ) -> bool:
@@ -319,7 +319,7 @@ def _try_close_position(
 
     if exit_reason is None:
         active.bars_held += 1
-        if active.bars_held >= backtest.max_holding_bars:  # type: ignore[union-attr]
+        if active.bars_held >= backtest.max_holding_bars:
             raw_exit_price = row.close
             exit_reason = "time_exit"
             is_ambiguous = False
@@ -340,8 +340,8 @@ def _try_close_position(
     net_pnl = gross_pnl - active.commission_entry_usd - commission_exit
     state.balance += net_pnl
     state.daily_realized[current_day] = state.daily_realized.get(current_day, 0.0) + net_pnl
-    if net_pnl < 0.0 and risk.cooldown_bars_after_loss > 0:  # type: ignore[union-attr]
-        state.cooldown_until_index[row.symbol] = series_index + risk.cooldown_bars_after_loss  # type: ignore[union-attr]
+    if net_pnl < 0.0 and risk.cooldown_bars_after_loss > 0:
+        state.cooldown_until_index[row.symbol] = series_index + risk.cooldown_bars_after_loss
     state.trades.append(_make_trade_record(
         active, row.timestamp.isoformat(), exit_price, gross_pnl,
         commission_exit, spread_cost_usd, slippage_cost_usd, net_pnl, exit_reason, is_ambiguous,
@@ -354,7 +354,7 @@ def _close_remaining_positions(
     state: _BacktestEngineState,
     rows_by_symbol: dict[str, list[ProcessedRow]],
     instruments: dict,
-    backtest: object,
+    backtest: BacktestConfig,
     aux_rates: dict[str, float] | None,
 ) -> None:
     """Close all open positions at end-of-data using each symbol's last bar."""
@@ -541,64 +541,6 @@ def write_equity_curve(path: Path, equity_curve: list[EquityPoint]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Experiment reference loader
-# ---------------------------------------------------------------------------
-
-def _locate_experiment_reference(settings: Settings) -> ExperimentReference:
-    if settings.backtest.experiment_run_dir:
-        run_dir = Path(settings.backtest.experiment_run_dir)
-    else:
-        candidates = sorted(settings.data.runs_dir.glob("*_experiment"))
-        if not candidates:
-            raise FileNotFoundError("No experiment runs found")
-        run_dir = candidates[-1]
-
-    report_path = run_dir / "experiment_report.json"
-    model_path = run_dir / "models" / "xgboost_model.json"
-    if not report_path.exists():
-        raise FileNotFoundError(f"experiment_report.json not found in {run_dir}")
-    if not model_path.exists():
-        raise FileNotFoundError(f"xgboost_model.json not found in {run_dir}")
-
-    payload = json.loads(report_path.read_text(encoding="utf-8"))
-    xgb_section = payload.get("xgboost")
-    if not isinstance(xgb_section, dict):
-        raise FileNotFoundError("XGBoost metadata missing from experiment_report")
-    threshold = xgb_section["threshold"]["threshold"]
-    split_summary = payload["split_summary"]
-    test_summary = next(item for item in split_summary if item["name"] == "test")
-    return ExperimentReference(
-        run_dir=run_dir,
-        model_path=model_path,
-        report_path=report_path,
-        threshold=float(threshold),
-        threshold_metric=str(xgb_section["threshold"]["metric_name"]),
-        threshold_value=float(xgb_section["threshold"]["metric_value"]),
-        feature_names=list(payload["feature_names"]),
-        test_start_timestamp=str(test_summary["start_timestamp"]),
-        test_end_timestamp=str(test_summary["end_timestamp"]),
-    )
-
-
-def _filter_backtest_rows(
-    dataset: ProcessedDataset,
-    settings: Settings,
-    reference: ExperimentReference,
-) -> list[ProcessedRow]:
-    test_start = datetime.fromisoformat(reference.test_start_timestamp)
-    test_end = datetime.fromisoformat(reference.test_end_timestamp)
-    rows = [
-        row
-        for row in dataset.rows
-        if row.timeframe == settings.trading.primary_timeframe
-        and row.symbol in set(settings.trading.symbols)
-        and test_start <= row.timestamp <= test_end
-    ]
-    rows.sort(key=lambda r: (r.timestamp, r.symbol))
-    return rows
-
-
-# ---------------------------------------------------------------------------
 # Top-level entry point
 # ---------------------------------------------------------------------------
 
@@ -620,7 +562,7 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
     logger = configure_logging(run_dir, settings.logging.level, settings.logging.format)
 
     try:
-        reference = _locate_experiment_reference(settings)
+        reference = locate_experiment_reference(settings)
     except FileNotFoundError as exc:
         logger.error(str(exc))
         return 1
@@ -635,18 +577,10 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         logger.error(str(exc))
         return 1
 
-    rows = _filter_backtest_rows(dataset, settings, reference)
+    rows = filter_reference_rows(dataset, settings, reference)
     symbol_profiles = load_symbol_strategy_profiles(settings)
     tradable_states = {"enabled", "caution"}
-    rows = [
-        row
-        for row in rows
-        if symbol_profiles.get(row.symbol) is None
-        or (
-            symbol_profiles[row.symbol].enabled_state in tradable_states
-            and row_allowed_by_profile(symbol_profiles[row.symbol], row.timestamp, row.timeframe)
-        )
-    ]
+    rows = filter_rows_by_symbol_profiles(rows, symbol_profiles, allowed_states=tradable_states)
     if len(rows) < 20:
         logger.error("Insufficient processed rows for backtest: %s", len(rows))
         return 2
@@ -659,6 +593,19 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         return 3
 
     policy = intrabar_policy_override or settings.backtest.intrabar_policy
+    threshold_by_symbol = resolve_threshold_by_symbol(reference.threshold, symbol_profiles)
+    evaluation_contract = build_evaluation_contract(
+        settings,
+        evaluation_mode="economic_backtest_test_split",
+        threshold_source="experiment_reference_threshold",
+        threshold=reference.threshold,
+        threshold_metric=reference.threshold_metric,
+        threshold_value=reference.threshold_value,
+        threshold_by_symbol=threshold_by_symbol,
+        profile_gating_mode="symbol_profile_enabled_states_and_sessions",
+        allowed_profile_states=tradable_states,
+        consistency_requires_equity_curve=True,
+    )
 
     probabilities = compute_signal_probabilities(model, rows, reference.feature_names)
     metrics, trades, equity_curve = run_backtest_engine(
@@ -671,7 +618,7 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         exit_policy_config=settings.exit_policy,
         dynamic_exit_config=settings.dynamic_exits,
         symbol_exit_profiles={symbol: profile.exit_profile for symbol, profile in symbol_profiles.items()},
-        threshold_by_symbol={symbol: max(reference.threshold, profile.threshold) for symbol, profile in symbol_profiles.items()},
+        threshold_by_symbol=threshold_by_symbol,
     )
 
     # Consistency check
@@ -699,6 +646,26 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
     report: dict[str, object] = {
         "dataset_manifest": dataset.manifest,
         "dataset_schema": dataset.schema,
+        "training_contract_version": reference.training_contract_version or TRAINING_CONTRACT_VERSION,
+        "evaluation_contract_version": EVALUATION_CONTRACT_VERSION,
+        "training_contract": reference.training_contract or {
+            "source": "experiment_reference",
+            "reference_run_dir": str(reference.run_dir),
+            "contract_hash": reference.training_contract_hash,
+        },
+        "evaluation_contract": evaluation_contract,
+        "contract_hashes": {
+            "training_contract": reference.training_contract_hash,
+            "evaluation_contract": contract_fingerprint(evaluation_contract),
+            "bundle": contract_bundle_fingerprint(
+                reference.training_contract or {
+                    "source": "experiment_reference",
+                    "reference_run_dir": str(reference.run_dir),
+                    "contract_hash": reference.training_contract_hash,
+                },
+                evaluation_contract,
+            ),
+        },
         "experiment_reference": {
             "run_dir": str(reference.run_dir),
             "report_path": str(reference.report_path),
@@ -708,6 +675,8 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
             "threshold_value": reference.threshold_value,
             "test_start_timestamp": reference.test_start_timestamp,
             "test_end_timestamp": reference.test_end_timestamp,
+            "training_contract_version": reference.training_contract_version,
+            "evaluation_contract_version": reference.evaluation_contract_version,
         },
         "backtest_config": {
             "starting_balance_usd": settings.backtest.starting_balance_usd,
@@ -728,6 +697,7 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         },
         "dynamic_exit_config": asdict(settings.dynamic_exits),
         "strategy_profiles": {symbol: asdict(profile) for symbol, profile in symbol_profiles.items()},
+        "effective_threshold_by_symbol": threshold_by_symbol,
         "economic_model_notes": {
             "entry": "open of bar N+1 (one bar after signal bar N)",
             "exit_triggers": ["stop_loss", "take_profit", "time_exit", "end_of_data"],
@@ -740,6 +710,26 @@ def run_backtest(settings: Settings, intrabar_policy_override: str | None = None
         "consistency": consistency.to_dict(),
         "trade_count": len(trades),
     }
+    contract_hashes = cast(dict[str, str], report["contract_hashes"])
+    report = attach_artifact_provenance(
+        report,
+        build_artifact_provenance(
+            run_dir=run_dir,
+            source_run_id=reference.run_dir.name,
+            parent_run_id=reference.run_dir.name,
+            training_contract_version=reference.training_contract_version or TRAINING_CONTRACT_VERSION,
+            evaluation_contract_version=EVALUATION_CONTRACT_VERSION,
+            contract_hashes=contract_hashes,
+            correlation_keys={
+                "command": "backtest",
+                "experiment_run_id": reference.run_dir.name,
+            },
+            references={
+                "experiment_report_path": str(reference.report_path),
+                "model_path": str(reference.model_path),
+            },
+        ),
+    )
     write_json_report(run_dir, "backtest_report.json", report)
     logger.info(
         "backtest trades=%s ending_balance=%.2f intrabar_policy=%s consistency=%s run_dir=%s",

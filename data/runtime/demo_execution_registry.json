@@ -1,14 +1,15 @@
 {
   "artifact_type": "demo_execution_registry",
-  "checksum": "32815b6c8d6d3d5e2645a1eb7c0b0a9fd50d60b2c7f70cf842ba904ec99673be",
+  "artifact_version": "demo_execution_registry.v1",
+  "checksum": "61130bec3ca17456e643ba5d077929556ecce56dedbcb628e89ca55c394e3001",
   "compatibility": {
     "loader": "load_demo_execution_registry"
   },
-  "generated_at": "2026-04-06T04:45:42.995930+00:00",
+  "generated_at": "2026-04-08T05:42:15.552466+00:00",
   "payload": {
-    "active_symbol": "",
-    "gate_open": false,
-    "last_updated_at": "2026-04-06T04:45:42.995922+00:00",
+    "active_symbol": "EURUSD",
+    "gate_open": true,
+    "last_updated_at": "2026-04-08T05:42:15.552466+00:00",
     "symbols": {
       "AUDUSD": {
         "active_for_demo_execution": false,
@@ -32,25 +33,18 @@
         "threshold": 0.4
       },
       "EURUSD": {
-        "active_for_demo_execution": false,
-        "approved_for_demo_execution": false,
+        "active_for_demo_execution": true,
+        "approved_for_demo_execution": true,
         "base_profile_id": "EURUSD-20260401T193139Z_strategy_validation-a9d9d3d361",
         "base_promotion_state": "approved_demo",
-        "decision": "REJECT_FOR_DEMO_EXECUTION",
+        "decision": "APPROVED_FOR_DEMO_EXECUTION",
         "model_artifact_manifest_path": "/home/silver/projects/IRIS-Bot/data/runtime/demo_execution_models/EURUSD/model_artifact_manifest.json",
-        "model_variant": "symbol_specific",
-        "reasons": [
-          "test_expectancy_non_positive",
-          "test_profit_factor_below_floor",
-          "walk_forward_total_net_pnl_non_positive",
-          "walk_forward_expectancy_non_positive",
-          "walk_forward_profit_factor_below_floor",
-          "walk_forward_positive_ratio_below_floor"
-        ],
+        "model_variant": "V1_baseline",
+        "reasons": [],
         "stop_policy": "static",
         "symbol": "EURUSD",
         "target_policy": "static",
-        "threshold": 0.4
+        "threshold": 0.45
       },
       "GBPUSD": {
         "active_for_demo_execution": false,
@@ -63,9 +57,6 @@
         "reasons": [
           "test_expectancy_non_positive",
           "test_profit_factor_below_floor",
-          "walk_forward_total_net_pnl_non_positive",
-          "walk_forward_expectancy_non_positive",
-          "walk_forward_profit_factor_below_floor",
           "walk_forward_positive_ratio_below_floor"
         ],
         "stop_policy": "static",
@@ -89,12 +80,13 @@
           "walk_forward_profit_factor_below_floor",
           "walk_forward_positive_ratio_below_floor"
         ],
-        "stop_policy": "static",
+        "stop_policy": "",
         "symbol": "USDJPY",
-        "target_policy": "static",
+        "target_policy": "",
         "threshold": 0.4
       }
     }
   },
+  "provenance": {},
   "schema_version": 1
 }

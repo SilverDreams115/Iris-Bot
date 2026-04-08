@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from iris_bot.config import XGBoostConfig
+from iris_bot.durable_io import durable_write_json
 
 
 LABEL_TO_CLASS = {-1: 0, 0: 1, 1: 2}
@@ -346,7 +347,7 @@ class XGBoostMultiClassModel:
             probability_calibration=self.probability_calibration_metadata(),
             feature_importance=self.feature_importance(),
         )
-        metadata_path.write_text(json.dumps(asdict(metadata), indent=2, sort_keys=True), encoding="utf-8")
+        durable_write_json(metadata_path, asdict(metadata))
 
     def load(self, model_path: Path) -> None:
         try:

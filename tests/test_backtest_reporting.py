@@ -74,3 +74,11 @@ def test_run_backtest_creates_artifacts(tmp_path: Path, monkeypatch: pytest.Monk
     payload = json.loads((backtest_run_dir / "backtest_report.json").read_text(encoding="utf-8"))
     assert "metrics" in payload
     assert "experiment_reference" in payload
+    assert payload["training_contract_version"] == "1.0"
+    assert payload["evaluation_contract_version"] == "1.0"
+    assert payload["evaluation_contract"]["threshold_application"]["policy"] == "max_global_and_profile_threshold"
+    assert "effective_threshold_by_symbol" in payload
+    assert payload["artifact_provenance"]["correlation_keys"]["command"] == "backtest"
+    assert payload["artifact_provenance"]["correlation_keys"]["experiment_run_id"] == experiment_run_dir.name
+    assert payload["artifact_provenance"]["source_run_id"] == experiment_run_dir.name
+    assert payload["artifact_provenance"]["references"]["experiment_report_path"].endswith("experiment_report.json")

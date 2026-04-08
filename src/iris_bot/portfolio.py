@@ -26,15 +26,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from iris_bot.config import Settings
+from iris_bot.governance_policy import (
+    bundled_deliberately_blocked_symbols,
+    deliberately_blocked_symbol_details,
+    deliberately_blocked_symbols,
+    load_governance_policy,
+)
 
 
-# Symbols excluded from promotion by design, with permanent reasons.
-# These are NOT config-driven because the reasons are architectural decisions,
-# not threshold parameters. Adding a symbol here means it cannot be approved_demo
-# regardless of any other evidence.
-_PERMANENTLY_EXCLUDED: dict[str, str] = {
-    "USDJPY": "insufficient_edge_detected_in_research_phase",
-}
+_PERMANENTLY_EXCLUDED: dict[str, str] = bundled_deliberately_blocked_symbols()
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,10 @@ class PortfolioSeparation:
     approved_demo_universe: tuple[str, ...]
     active_portfolio: tuple[str, ...]
     deliberately_blocked: dict[str, str]  # symbol → reason
+    deliberately_blocked_details: dict[str, dict[str, str]]
     registry_active_profiles: dict[str, str]  # symbol → profile_id
+    policy_version: str
+    policy_source: str
     generated_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -54,7 +57,12 @@ class PortfolioSeparation:
             "approved_demo_universe": list(self.approved_demo_universe),
             "active_portfolio": list(self.active_portfolio),
             "deliberately_blocked": dict(self.deliberately_blocked),
+            "deliberately_blocked_details": {
+                symbol: dict(details) for symbol, details in self.deliberately_blocked_details.items()
+            },
             "registry_active_profiles": dict(self.registry_active_profiles),
+            "policy_version": self.policy_version,
+            "policy_source": self.policy_source,
             "generated_at": self.generated_at,
             "counts": {
                 "full_universe": len(self.full_universe),
@@ -87,16 +95,23 @@ def build_portfolio_separation(
     Does not perform I/O beyond reading the provided registry dict.
     """
     full_universe = tuple(settings.trading.symbols)
+    policy = load_governance_policy(settings)
 
     # Eligible = not permanently excluded
+    blocked_map = deliberately_blocked_symbols(settings)
     eligible_universe = tuple(
-        s for s in full_universe if s not in _PERMANENTLY_EXCLUDED
+        s for s in full_universe if s not in blocked_map
     )
 
     # deliberately_blocked = all permanently excluded symbols that are in the full universe
     deliberately_blocked = {
         s: reason
-        for s, reason in _PERMANENTLY_EXCLUDED.items()
+        for s, reason in blocked_map.items()
+        if s in full_universe
+    }
+    deliberately_blocked_details = {
+        s: details
+        for s, details in deliberately_blocked_symbol_details(settings).items()
         if s in full_universe
     }
 
@@ -132,7 +147,10 @@ def build_portfolio_separation(
         approved_demo_universe=tuple(approved_demo_universe),
         active_portfolio=tuple(active_portfolio),
         deliberately_blocked=deliberately_blocked,
+        deliberately_blocked_details=deliberately_blocked_details,
         registry_active_profiles=registry_active_profiles,
+        policy_version=str(policy["policy_version"]),
+        policy_source=str(policy["policy_source"]),
         generated_at=datetime.now(tz=UTC).isoformat(),
     )
 
@@ -179,6 +197,11 @@ def active_portfolio_status_report(
         "portfolio_separation": separation.to_dict(),
         "per_symbol_eligible": per_symbol,
         "deliberately_blocked": separation.deliberately_blocked,
+        "deliberately_blocked_details": separation.deliberately_blocked_details,
+        "policy_context": {
+            "policy_version": separation.policy_version,
+            "policy_source": separation.policy_source,
+        },
         "portfolio_impact_of_blocked": separation.portfolio_impact_of_blocked(),
         "summary": {
             "active_portfolio_size": len(separation.active_portfolio),
@@ -211,6 +234,7 @@ def active_universe_status_report(
             all_symbols[symbol] = {
                 "universe_category": "deliberately_blocked",
                 "blocking_reason": separation.deliberately_blocked[symbol],
+                "policy_rule": separation.deliberately_blocked_details.get(symbol, {}),
                 "would_affect_portfolio": symbol in separation.approved_demo_universe or symbol in separation.active_portfolio,
                 "in_eligible_universe": False,
                 "in_approved_demo": False,
@@ -233,4 +257,8 @@ def active_universe_status_report(
         "per_symbol": all_symbols,
         "summary": portfolio_report["summary"],
         "generated_at": datetime.now(tz=UTC).isoformat(),
+        "policy_context": {
+            "policy_version": separation.policy_version,
+            "policy_source": separation.policy_source,
+        },
     }
